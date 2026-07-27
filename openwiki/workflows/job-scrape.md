@@ -20,6 +20,7 @@ This workflow consumes slugs from [board discovery](board-discovery.md), calls e
 - `--title` and `--grep` together are ANDed.
 - `--since AGE` keeps postings whose normalized `publishedAt` parses at or after the cutoff from `parse_duration()`. Accepted forms are `7d`, `2w`, `3m`, `1y`, or a bare day count; missing or malformed dates are excluded because the flag promises freshness.
 - `--new-only` removes rows whose `(ats, id)` already exists in SQLite via `known_keys()`. It is applied after board fetches so scanning stays storage-independent, and it exits early when combined with `--no-db`.
+- `--sort board` keeps the default platform/company/title grouping; `--sort recent` puts the newest normalized `publishedAt` first and leaves undated postings last, which is the intended pairing for freshness runs such as `--since 1d`.
 - `--remote` keeps only jobs whose normalized `isRemote` value is truthy. Ashby provides a remote flag, Greenhouse infers it from the location label, and Lever uses `workplaceType == "remote"`.
 - `--limit` scans only the first N loaded boards per platform.
 - `--concurrency` controls the thread-pool size and defaults to 8.
@@ -86,7 +87,7 @@ Payload shape failures are not swallowed by `scan_board()`; missing or non-list 
 
 ## Output writing
 
-After optional `--new-only` filtering, rows are sorted by `ats`, lowercased company, and lowercased title, then written to:
+After optional `--new-only` filtering, `sort_rows()` orders rows by platform/company/title for the default `--sort board` mode, or by descending `publishedAt` for `--sort recent` after a stable board-order pre-sort. The ordered rows are then written to:
 
 - `${out}.csv` using UTF-8 with BOM so Excel handles punctuation in locations.
 - `${out}.json` as indented JSON rows.

@@ -622,6 +622,47 @@ def test_every_cli_flag_is_documented_in_the_readme():
     assert not missing, f"undocumented in README.md: {missing}"
 
 
+def test_sort_recent_puts_the_newest_first():
+    """With --since, alphabetical order buries the thing you asked for.
+
+    A real run returned 5,980 postings from the last 24 hours; sorted by board, the
+    six-minute-old one sat somewhere in the middle.
+    """
+    from job_boards import sort_rows
+    rows = [
+        BASE | {"ats": "lever", "company": "zz", "id": "old",
+                "publishedAt": "2020-01-01T00:00:00+00:00"},
+        BASE | {"ats": "ashby", "company": "aa", "id": "new",
+                "publishedAt": "2026-07-27T23:00:00+00:00"},
+        BASE | {"ats": "greenhouse", "company": "mm", "id": "mid",
+                "publishedAt": "2026-07-01T00:00:00+00:00"},
+        BASE | {"ats": "ashby", "company": "bb", "id": "undated", "publishedAt": ""},
+    ]
+    recent = list(rows)
+    sort_rows(recent, "recent")
+    assert [r["id"] for r in recent] == ["new", "mid", "old", "undated"], \
+        "newest first, undated last"
+
+    board = list(rows)
+    sort_rows(board, "board")
+    assert [r["id"] for r in board] == ["new", "undated", "mid", "old"], \
+        "board order groups by ats then company"
+
+
+def test_sort_recent_is_deterministic_within_a_timestamp():
+    """Two postings sharing a timestamp must not reorder between runs."""
+    from job_boards import sort_rows
+    same = "2026-07-27T12:00:00+00:00"
+    rows = [
+        BASE | {"ats": "lever", "company": "zz", "id": "3", "publishedAt": same},
+        BASE | {"ats": "ashby", "company": "bb", "id": "2", "publishedAt": same},
+        BASE | {"ats": "ashby", "company": "aa", "id": "1", "publishedAt": same},
+    ]
+    first = list(rows); sort_rows(first, "recent")
+    shuffled = [rows[2], rows[0], rows[1]]; sort_rows(shuffled, "recent")
+    assert [r["id"] for r in first] == [r["id"] for r in shuffled] == ["1", "2", "3"]
+
+
 def test_wiki_does_not_cite_tests_that_do_not_exist():
     """Generated docs can be confidently wrong, not just incomplete.
 

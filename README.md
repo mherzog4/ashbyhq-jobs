@@ -113,10 +113,29 @@ the raw API. Lever boards accumulate the most evergreen postings by a wide margi
 that, and they catch different things:
 
 ```bash
+uv run job_boards.py --all --since 1d --sort recent   # today's postings, newest first
 uv run job_boards.py --all --since 7d     # published in the last week
 uv run job_boards.py --all --new-only     # never seen by the database before
 uv run job_boards.py --all --since 30d --new-only
 ```
+
+**Today's jobs, today.** `--since 1d` over all 13,146 boards takes about 6½ minutes and
+returned **5,980 postings** on a real run — 133 of them published within the previous
+hour, the freshest **6 minutes old**. Pair it with `--sort recent` so the newest are at
+the top; the default `--sort board` groups by platform and company, which buries them.
+
+| posted within | jobs |
+|---|---|
+| 1 hour | 133 |
+| 3 hours | 686 |
+| 6 hours | 1,909 |
+| 12 hours | 4,441 |
+| 24 hours | 5,980 |
+
+None of the three APIs support server-side date filtering — `updated_after` and friends
+are silently ignored, verified against all three — so every board is fetched and the
+window is applied locally. 6½ minutes is therefore the floor for a full sweep, and the
+only way to see a posting sooner is to run more often.
 
 `--since` accepts `7d`, `2w`, `3m`, `1y`, or a bare number of days:
 

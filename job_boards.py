@@ -677,6 +677,20 @@ def _prepare(con: sqlite3.Connection) -> None:
     con.executescript(_INDEXES)
 
 
+def sort_rows(rows: list[dict], mode: str) -> None:
+    """Order rows in place. `recent` puts the newest posting first.
+
+    Comparing the ISO strings is correct without parsing, because every adapter
+    normalises to ISO — including Lever's epoch milliseconds. Two passes rather than
+    one compound key: Python's sort is stable, so sorting by board first and then by
+    date gives newest-first with a deterministic order inside each timestamp. An
+    empty date is the smallest string, so reversing puts undated rows last.
+    """
+    rows.sort(key=lambda r: (r["ats"], str(r["company"]).lower(), str(r["title"]).lower()))
+    if mode == "recent":
+        rows.sort(key=lambda r: str(r["publishedAt"]), reverse=True)
+
+
 def may_close_postings(
     title: str | None,
     pattern: re.Pattern[str] | None,
@@ -822,6 +836,13 @@ def main() -> None:
         help="only postings the database has never seen. Catches an old requisition "
         "that appeared today, which --since cannot. Requires the database",
     )
+    p.add_argument(
+        "--sort",
+        choices=("board", "recent"),
+        default="board",
+        help="board: grouped by platform and company (default). recent: newest "
+        "posting first, which is what you want with --since",
+    )
     p.add_argument("--limit", type=int, help="max boards per platform (default: all)")
     p.add_argument("--remote", action="store_true", help="only remote postings")
     p.add_argument("--concurrency", type=int, default=8)
@@ -937,7 +958,7 @@ def main() -> None:
         print(f"  --new-only: {before - len(rows)} already known, {len(rows)} new",
               file=sys.stderr)
 
-    rows.sort(key=lambda r: (r["ats"], str(r["company"]).lower(), str(r["title"]).lower()))
+    sort_rows(rows, args.sort)
 
     # BOM so Excel renders the en-dashes and bullets in location strings.
     csv_path = HERE / f"{args.out}.csv"
