@@ -1,4 +1,4 @@
 # Files
 
-- [Ashby Jobs Output and Persistence Model](data-model.md) - Documents the scraper's CSV and JSON row shape, SQLite jobs table, upsert rules, and posting lifecycle semantics for first_seen, last_seen, and closed_at.
-- [Ashby Jobs Runtime Architecture](overview.md) - Explains the two-phase architecture of the Ashby public job scraper, including board discovery, concurrent job scanning, output generation, and SQLite persistence.
+- [Job Boards Output and Persistence Model](data-model.md) - Documents the scraper's cross-ATS CSV and JSON row shape, SQLite jobs table, composite upsert rules, and posting lifecycle semantics for first_seen, last_seen, and closed_at.
+- [Job Boards Runtime Architecture](overview.md) - Explains the two-phase architecture of the public job-board scraper, including multi-ATS board discovery, adapter-based job scanning, output generation, and SQLite persistence.

@@ -1,66 +1,73 @@
 ---
 type: Architecture Overview
-title: Ashby Jobs Runtime Architecture
-description: Explains the two-phase architecture of the Ashby public job scraper, including board discovery, concurrent job scanning, output generation, and SQLite persistence.
-tags: [architecture, scraper, ashby-jobs]
+title: Job Boards Runtime Architecture
+description: Explains the two-phase architecture of the public job-board scraper, including multi-ATS board discovery, adapter-based job scanning, output generation, and SQLite persistence.
+tags: [architecture, scraper, job-boards]
 ---
 
 # Architecture overview
 
-`/ashby_jobs.py` is a single-file CLI organized around two phases: discover or load board slugs, then scan those boards for listed postings. The [board discovery workflow](../workflows/board-discovery.md) supplies the slug universe, the [job scrape workflow](../workflows/job-scrape.md) applies user filters, and the [data model](data-model.md) persists the flattened results.
+`/job_boards.py` is a single-file CLI organized around two phases: discover or load board slugs per ATS, then scan those boards for postings. The [board discovery workflow](../workflows/board-discovery.md) supplies the slug universe, the [job scrape workflow](../workflows/job-scrape.md) applies user filters and per-ATS normalizers, and the [data model](data-model.md) persists the flattened results.
 
 ## Runtime flow
 
 ```mermaid
 sequenceDiagram
     participant User as CLI user
-    participant Main as ashby_jobs main
+    participant Main as job_boards main
     participant Boards as board loader
-    participant API as Ashby posting API
+    participant Sources as ATS adapters
+    participant API as Posting APIs
     participant Outputs as CSV JSON SQLite
     User->>Main: run uv script with flags
-    Main->>Boards: load_boards refresh flag
-    alt refresh requested or no cache
-        Boards->>Boards: discover candidates and validate slugs
-    else cache exists
-        Boards->>Boards: read boards json or seed json
+    Main->>Boards: load_boards refresh flag and ats list
+    alt refresh requested or no usable cache
+        Boards->>Boards: discover candidates and validate slugs per ATS
+    else cache or seed exists
+        Boards->>Boards: merge boards json and seed json per ATS
     end
+    Main->>Sources: select Ashby Greenhouse Lever adapters
     Main->>API: scan selected boards concurrently
-    API-->>Main: board payloads with jobs arrays
-    Main->>Main: filter listed jobs by title grep remote
+    API-->>Sources: platform payloads
+    Sources-->>Main: normalized rows with ats field
+    Main->>Main: filter jobs by title grep remote
     Main->>Outputs: write CSV and JSON
     opt database enabled
         Main->>Outputs: upsert rows and close missing postings when unfiltered
     end
 ```
 
-This diagram follows `main()`, `load_boards()`, `scan_board()`, and `save()` in `/ashby_jobs.py`.
+This diagram follows `main()`, `load_boards()`, `SOURCES`, `scan_board()`, and `save()` in `/job_boards.py`.
 
 ## Main components
 
 | Component | Source | Responsibility |
 |---|---|---|
-| CLI parser | `/ashby_jobs.py` `main()` | Validates flag combinations, compiles optional grep regex, derives default title behavior, selects board subset, orchestrates scanning and writing. |
-| HTTP client | `/ashby_jobs.py` `fetch()` | Adds `User-Agent` and gzip headers, decompresses gzip responses, maps 404 to `NotFound`, maps 503 to `RateLimited`, and retries transient 5xx/URL errors. |
-| Board loader | `/ashby_jobs.py` `load_boards()` | Reads generated `boards.json`, falls back to `/boards.seed.json`, or calls discovery on `--refresh-boards`. |
-| Scanner | `/ashby_jobs.py` `scan_board()` | Fetches one board, validates payload shape, filters jobs, flattens API fields, and retains only grep fragments from descriptions. |
-| Persistence | `/ashby_jobs.py` `save()` | Creates or migrates the SQLite table, upserts by Ashby posting UUID, preserves history, and stamps `closed_at` only when coverage is exhaustive. |
+| CLI parser | `/job_boards.py` `main()` | Validates flag combinations, parses `--ats`, compiles optional grep regex, derives default title behavior, selects board subset, orchestrates scanning and writing. |
+| HTTP client | `/job_boards.py` `fetch()` | Adds `User-Agent` and gzip headers, decompresses gzip responses, maps 404 to `NotFound`, maps 503 to `RateLimited`, and retries transient 5xx/URL errors. |
+| ATS adapters | `/job_boards.py` `SOURCES`, `normalize_ashby()`, `normalize_greenhouse()`, `normalize_lever()` | Define archive domains, posting API URL templates, payload job extraction, optional content parameters, and normalization into the shared row shape. |
+| Board loader | `/job_boards.py` `load_boards()` | Merges generated `boards.json` and `/boards.seed.json` by platform, or calls discovery for each selected ATS on `--refresh-boards`. |
+| Scanner | `/job_boards.py` `scan_board()` | Fetches one platform board, validates payload shape, normalizes jobs, filters rows, and retains only grep fragments from descriptions. |
+| Persistence | `/job_boards.py` `save()` | Creates or migrates the SQLite table, upserts by `(ats, posting id)`, preserves history, and stamps `closed_at` only when coverage is exhaustive. |
 
 ## Design constraints
 
-The architecture exists because Ashby has no global public search endpoint. The README documents the public endpoint as `GET https://api.ashbyhq.com/posting-api/job-board/{slug}` and the code defines that URL as `POSTING_API`. Every global search therefore becomes many per-board reads.
+The architecture exists because Ashby, Greenhouse, and Lever expose public per-company posting APIs but no global search endpoint. `SOURCES` records the API URL template for each platform, so every global search becomes many per-board reads coordinated by [board discovery](../workflows/board-discovery.md).
 
-The scraper also treats descriptions as heavy data. `scan_board()` reads `descriptionPlain` or `descriptionHtml` only when `--grep` is set, strips markup through `plain_text()`, stores at most two surrounding fragments from `fragments()`, and never includes whole descriptions in output rows. This keeps the [job scrape workflow](../workflows/job-scrape.md) aligned with the README claim that descriptions dominate payload size without changing CSV or database shape.
+The scraper treats platform payloads as adapter input rather than a shared schema. Ashby uses `title` and `isListed`, Greenhouse nests `location` and has integer ids, and Lever uses `text` for the title and epoch-millisecond `createdAt`. Keeping those rules in normalizers lets the [job scrape workflow](../workflows/job-scrape.md) and [data model](data-model.md) stay platform-agnostic after row construction.
 
-Concurrency is deliberately simple: `ThreadPoolExecutor(max_workers=args.concurrency)` fans out over board slugs in `main()`, and discovery validation uses the same pattern in `discover_boards()`. The README and code default to 8 workers for Ashby traffic, while Common Crawl paging is separately throttled in [board discovery](../workflows/board-discovery.md).
+Descriptions are intentionally bounded. Ashby and Lever return description text in the normal board payload, but Greenhouse requires `?content=true`, which the README documents as roughly 26x the bytes for a measured board. `scan_board()` only requests Greenhouse content when `--grep` is set, strips markup through `plain_text()`, stores at most two surrounding fragments from `fragments()`, and never includes whole descriptions in output rows.
+
+Concurrency is deliberately simple: `ThreadPoolExecutor(max_workers=args.concurrency)` fans out over `(ats, slug)` pairs in `main()`, and discovery validation uses the same pattern in `discover_boards()`. Common Crawl paging is separately throttled in [board discovery](../workflows/board-discovery.md).
 
 ## Error handling boundaries
 
-- A 404 while scanning a board marks the slug dead for the current run; if the run is not limited, the code rewrites `boards.json` without dead slugs.
-- Board payloads without a `jobs` array raise `ValueError` so API shape changes fail loudly instead of looking like zero matches.
+- A 404 while scanning a board marks the `(ats, slug)` dead for the current run; if the run is not limited, the code rewrites `boards.json` without dead slugs for the selected platforms.
+- Platform payloads that do not yield a jobs list raise `ValueError` so API shape changes fail loudly instead of looking like zero matches.
 - `--all` cannot be combined with `--title` or `--grep`; only unfiltered scans have the standing to close missing postings in the [data model](data-model.md).
+- Invalid `--ats` values exit before scanning; valid values come from `SOURCES`.
 - Invalid grep regex exits before scanning; grep patterns without `\b` emit a warning because unbounded terms such as `rust` match words like `trust`.
 
 ## Historical notes
 
-Git history explains why the architecture is shaped this way. The project began as a public Ashby board scraper. Later commits split the seed from the generated cache, added description grep, added SQLite accumulation, moved discovery to Wayback-first with `HEAD` validation, added `--all`, and finally added disappearance tracking through `closed_at`. When changing the architecture, preserve those hard-won boundaries unless source evidence shows they are obsolete.
+Git history explains why the architecture is shaped this way. The project began as a public Ashby board scraper. Later commits split the seed from the generated cache, added description grep, added SQLite accumulation, moved discovery to Wayback-first with `HEAD` validation, added `--all`, and added disappearance tracking through `closed_at`. The latest major source change generalized the design to Ashby, Greenhouse, and Lever by replacing single-platform constants with `SOURCES`, adding normalizers, and changing persistence to the composite `(ats, id)` key. When changing the architecture, preserve those hard-won boundaries unless source evidence shows they are obsolete.
