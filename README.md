@@ -463,38 +463,36 @@ it. Keep that warning.
 of its claims were wrong within the hour, including its own note about not being able to
 run the tests.
 
-Two workflows in `.github/workflows/` handle that:
+The split is deliberate: **CI enforces that you regenerated; a human does the
+regenerating.**
 
 | workflow | trigger | what it does |
 |---|---|---|
-| `openwiki-pr-sync.yml` | a PR touching `job_boards.py`, `README.md`, tests or the seed | regenerates the wiki and pushes the result onto the PR branch |
-| `openwiki-update.yml` | manual (`workflow_dispatch`) | full refresh, opens a PR with the result |
+| `openwiki-drift-check.yml` | a PR touching `job_boards.py`, `README.md`, tests or the seed | **fails** the PR if `openwiki/` was not updated too |
+| `openwiki-update.yml` | manual (`workflow_dispatch`) | full refresh in CI, opens a PR — needs an API key |
 
-Both need an `OPENROUTER_API_KEY` secret and are **inert without it** — the PR sync gates
-on the key and skips with a note rather than failing, so a fork or an unconfigured clone
-sees a green check instead of a red X on every pull request.
-
-```bash
-gh secret set OPENROUTER_API_KEY   # then the PR sync starts working
-```
-
-Three details in the PR sync are deliberate, since it runs with `contents: write`:
-
-- The `paths:` filter excludes `openwiki/`, and the commit it pushes touches only
-  `openwiki/` — so the job cannot retrigger itself and loop.
-- `actions/checkout` takes `head.sha`, never `head.ref`. Branch names are
-  attacker-controlled text and must not reach a `ref:`.
-- The branch name is passed to the push step through `env:`, so a branch called `$(...)`
-  cannot execute. No `github.event` value is interpolated into any `run:` block, and all
-  actions are pinned to commit SHAs.
-
-Fork PRs are skipped entirely: they receive no secrets and must not be pushed to.
-
-You can always regenerate by hand:
+So the loop is:
 
 ```bash
 openwiki --update
+git add openwiki AGENTS.md CLAUDE.md
+git commit -m "docs: sync OpenWiki"
 ```
+
+Put `[skip-wiki]` in the PR title to bypass the check for a change that genuinely does
+not affect the wiki.
+
+**Why the drift check doesn't just regenerate for you.** Regenerating needs provider
+credentials, and OpenWiki can authenticate with a ChatGPT subscription — an OAuth
+access/refresh pair scoped to the *whole account*, which expires and rotates. In a public
+repository's Actions secrets that would be an account-level credential that also breaks
+silently on expiry, so the check needs no credentials at all instead. A scoped
+`OPENAI_API_KEY` or `OPENROUTER_API_KEY` is safe to add if you want CI to do the
+regeneration — that is what `openwiki-update.yml` uses.
+
+Both workflows keep `actions/checkout` on `head.sha` rather than a branch name, pass
+every untrusted value through `env:` instead of interpolating it into a `run:` block, and
+pin all actions to commit SHAs. The drift check runs with `contents: read` only.
 
 ## Being a good citizen
 

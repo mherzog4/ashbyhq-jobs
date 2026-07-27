@@ -38,6 +38,13 @@ jobs:
         # mermaid + jsdom are optional; they add high-fidelity validation of Mermaid diagrams. Remove if your wiki has none.
         run: npm install --global openwiki@0.2.3 mermaid@11.16.0 jsdom@29.1.1
 
+      # Needs a scoped API key. OpenWiki can also authenticate with a ChatGPT
+      # subscription (OPENWIKI_PROVIDER=openai-chatgpt), but that credential is an
+      # OAuth access/refresh pair for the whole account which expires and rotates,
+      # so it does not belong in a public repository's Actions secrets. Use an
+      # OpenRouter key here, or switch to OPENWIKI_PROVIDER=openai with
+      # OPENAI_API_KEY. Day-to-day regeneration happens locally instead — see
+      # the drift check in openwiki-drift-check.yml.
       - name: Run OpenWiki
         run: openwiki code --update --print
         env:

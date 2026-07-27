@@ -1,0 +1,78 @@
+name: OpenWiki Drift Check
+
+# Fails a pull request that changes the code without regenerating openwiki/.
+# The wiki went stale within an hour the last time code moved without it, and
+# four of its claims were wrong — including its own note about the test suite.
+#
+# This deliberately does NOT run OpenWiki. Regenerating needs provider
+# credentials, and the maintainer authenticates with a ChatGPT subscription:
+# an OAuth access/refresh pair scoped to the whole account, which expires and
+# rotates. Putting that in a public repository's Actions secrets would be an
+# account-level credential that silently breaks on expiry. A scoped
+# OPENAI_API_KEY or OPENROUTER_API_KEY would be safe to add later — see the
+# README — but the check below needs no credentials at all.
+#
+# So: CI enforces that the wiki was regenerated; a human runs `openwiki --update`.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "job_boards.py"
+      - "test_job_boards.py"
+      - "README.md"
+      - "boards.seed.json"
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # A SHA, never a branch name. Branch names are attacker-controlled text
+          # and must not be interpolated into `ref:`.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fail if code moved but the wiki did not
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          code=$(echo "$changed" | grep -E '^(job_boards\.py|test_job_boards\.py|README\.md|boards\.seed\.json)$' || true)
+          wiki=$(echo "$changed" | grep -E '^openwiki/' || true)
+
+          if [ -z "$code" ]; then
+            echo "No tracked source or docs changed; nothing to check."
+            exit 0
+          fi
+          echo "Changed source/docs:"; echo "$code" | sed 's/^/  /'
+
+          if [ -n "$wiki" ]; then
+            echo "openwiki/ was updated in this PR:"; echo "$wiki" | sed 's/^/  /'
+            exit 0
+          fi
+
+          cat >&2 <<'MSG'
+
+          This PR changes the code or README but does not update openwiki/.
+
+          The wiki is generated and goes stale fast. Regenerate it and commit
+          the result:
+
+              openwiki --update
+              git add openwiki AGENTS.md CLAUDE.md
+              git commit -m "docs: sync OpenWiki"
+
+          If the change genuinely does not affect the wiki (a typo fix, a
+          comment), add [skip-wiki] to the PR title to bypass this check.
+          MSG
+          exit 1
+        # A deliberate escape hatch, evaluated on the title rather than in the
+        # script so the untrusted string never reaches a shell.
+        if: "!contains(github.event.pull_request.title, '[skip-wiki]')"
