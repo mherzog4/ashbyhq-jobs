@@ -17,8 +17,8 @@ second. Run it before and after any change — do not document behaviour as unve
 without trying both commands below.
 
 ```bash
-uv run test_ashby_jobs.py     # preferred: uv provisions Python 3.11
-python3 test_ashby_jobs.py    # fallback: works on any Python >= 3.9, including
+uv run test_job_boards.py     # preferred: uv provisions Python 3.11
+python3 test_job_boards.py    # fallback: works on any Python >= 3.9, including
                               # macOS's system python3, with uv absent from PATH
 ```
 
@@ -28,15 +28,23 @@ run. Both print `ok` on success.
 
 ## Do not run casually
 
-`--refresh-boards` and `--all` are live network operations: about two minutes and
-~130MB across ~3,600 boards. Never in a loop. Everything you need to verify a code
-change is covered by the offline suite.
+`--refresh-boards` and `--all` are live network operations across ~12,000 boards on
+three platforms. Never in a loop. Everything you need to verify a code change is
+covered by the offline suite. `--limit 10` plus `--ats <one>` is the cheap way to
+exercise a real request path.
 
-Set `ASHBY_SCRAPER_CONTACT` to a real address before any network run. Ask for one;
+`--grep` on Greenhouse requests full job descriptions, which is roughly **26x** the
+bytes of a normal run. Do not add it casually to an unlimited run.
+
+Set `JOB_SCRAPER_CONTACT` to a real address before any network run. Ask for one;
 do not invent it.
 
 ## Read before changing behaviour
 
-`README.md` has a "For coding agents (LLMs)" section listing six behaviours that look
-like bugs and are deliberate, each pinned by a test. Read it before changing filter
-logic, the database lifecycle, or board validation.
+`README.md` has a "For coding agents (LLMs)" section listing behaviours that look like
+bugs and are deliberate, each pinned by a test. Read it before changing filter logic,
+the database lifecycle, board validation, or any per-platform normaliser.
+
+The normalisers in `job_boards.py` are where platform differences live. Two that have
+already caused silent, wrong-looking-correct output: Lever's job title is `text`, not
+`title`, and its `createdAt` is epoch milliseconds rather than ISO.

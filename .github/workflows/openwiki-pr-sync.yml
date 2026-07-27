@@ -1,0 +1,100 @@
+name: OpenWiki PR Sync
+
+# Keeps openwiki/ in sync with the code in a pull request. The wiki went stale
+# within an hour the last time code moved without it, so this regenerates it and
+# pushes the result onto the PR branch.
+#
+# Inert until an OPENROUTER_API_KEY secret exists: the gate step below skips the
+# rest rather than failing, so a repository without the secret sees a green check
+# and a note instead of a red X on every PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # openwiki/ is deliberately absent. The commit this job pushes touches only
+    # openwiki/, so it cannot retrigger the workflow and loop.
+    paths:
+      - "job_boards.py"
+      - "test_job_boards.py"
+      - "README.md"
+      - "boards.seed.json"
+
+# One run per PR; a new push supersedes an in-flight regeneration.
+concurrency:
+  group: openwiki-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # Fork PRs get no secrets and must not be pushed to, so only same-repo
+    # branches are eligible.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on the API key being configured
+        id: gate
+        env:
+          KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "OPENROUTER_API_KEY is not set; skipping wiki regeneration." >&2
+            echo "Add it with: gh secret set OPENROUTER_API_KEY" >&2
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the pull request head
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # A SHA, never a branch name. Branch names are attacker-controlled text
+          # and must not be interpolated into `ref:`.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Node.js
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      # Without uv, OpenWiki cannot run this project's test suite and documents a
+      # "could not verify" caveat instead of checking its claims.
+      - name: Set up uv
+        if: steps.gate.outputs.ready == 'true'
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.8.4"
+
+      - name: Install OpenWiki
+        if: steps.gate.outputs.ready == 'true'
+        # mermaid + jsdom are optional; they add high-fidelity validation of Mermaid diagrams.
+        run: npm install --global openwiki@0.2.3 mermaid@11.16.0 jsdom@29.1.1
+
+      - name: Regenerate the wiki
+        if: steps.gate.outputs.ready == 'true'
+        run: openwiki code --update --print
+        env:
+          OPENWIKI_PROVIDER: openrouter
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENWIKI_MODEL_ID: z-ai/glm-5.2
+
+      - name: Push the regenerated wiki onto the PR branch
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          # Passed as an environment variable rather than interpolated into the
+          # script, so a branch named `$(...)` cannot execute.
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "openwiki-bot"
+          git config user.email "openwiki-bot@users.noreply.github.com"
+          git add openwiki AGENTS.md CLAUDE.md
+          if git diff --cached --quiet; then
+            echo "wiki already in sync with this PR"
+            exit 0
+          fi
+          git commit -m "docs: sync OpenWiki with this PR"
+          git push origin "HEAD:refs/heads/$BRANCH"

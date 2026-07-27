@@ -1,11 +1,11 @@
 # ashbyhq-jobs
 
-Pull every public job posting from every Ashby job board. No API key, no account, no
-dependencies.
+Pull every public job posting from every **Ashby, Greenhouse and Lever** job board.
+No API key, no account, no dependencies.
 
-Ashby's posting API is public but per-company, keyed by a board slug, with no global
-search endpoint. This finds the boards — 3,617 of them — then fans out across all of
-them. **~54,000 live postings, start to finish in about two minutes.**
+All three publish an unauthenticated posting API that is per-company, keyed by a board
+slug, with no global search endpoint. This finds the boards — **13,132** of them across
+the three platforms — then fans out across all of them. **~308,000 live postings.**
 
 > **Engineers and coding agents:** the [`openwiki/`](openwiki/quickstart.md) wiki is the
 > map of the code — architecture, workflows, data model, runbook. Agents should start
@@ -23,63 +23,57 @@ cd ashbyhq-jobs
 
 # Identify your traffic. Archive operators ask clients to do this, and it puts
 # your address on your requests rather than someone else's.
-export ASHBY_SCRAPER_CONTACT="you@example.com"
+export JOB_SCRAPER_CONTACT="you@example.com"
 
-# Find every board, then pull every posting from all of them.
-uv run ashby_jobs.py --refresh-boards --all
+# Find every board on every platform, then pull every posting from all of them.
+uv run job_boards.py --refresh-boards --all
 ```
 
-That is the whole thing. Expect roughly:
-
-```
-querying the Wayback Machine...
-  191135 archived URLs -> 7463 candidates
-validating 5000 plausible slugs against the posting API...
-  3611 live boards (1389 dead)
-  +6 from seed/previous runs
-cached 3617 slugs -> boards.json
-scanning 3617 boards for every listed job...
-  3617/3617 boards | 0 404 | 0 err | 54572 matches
-
-54572 jobs -> ashby-jobs.csv, ashby-jobs.json, ashby-jobs.db (54572 new, 0 already seen)
-```
-
-Roughly 80 seconds to discover the boards and 30 to scrape them. You end up with:
+That is the whole thing. You end up with:
 
 | file | what it is |
 |---|---|
-| `ashby-jobs.csv` | every posting, UTF-8 BOM so Excel renders `–`/`•` correctly |
-| `ashby-jobs.json` | the same rows |
-| `ashby-jobs.db` | SQLite, accumulating across runs with `first_seen`/`last_seen` |
-| `boards.json` | the 3,617 discovered slugs, cached so later runs skip discovery |
+| `job-boards.csv` | every posting, UTF-8 BOM so Excel renders `–`/`•` correctly |
+| `job-boards.json` | the same rows |
+| `job-boards.db` | SQLite, accumulating across runs, keyed on `(ats, id)` |
+| `boards.json` | the discovered slugs per platform, cached so later runs skip discovery |
 
-Later runs reuse `boards.json`, so a re-scrape is just `uv run ashby_jobs.py --all` and
-takes ~30 seconds. Re-run `--refresh-boards` about monthly — see
+Every row carries an `ats` column, so one CSV and one database cover all three platforms
+and you can slice by platform or ignore it entirely.
+
+Later runs reuse `boards.json`, so a re-scrape is just `uv run job_boards.py --all`.
+Re-run `--refresh-boards` about monthly — see
 [How recent is the data?](#how-recent-is-the-data) for why more often buys nothing.
 
 ### Narrower searches
 
 ```bash
-uv run ashby_jobs.py --title "software engineer"
-uv run ashby_jobs.py --title "software engineer" --match exact
-uv run ashby_jobs.py --title "product designer" --remote --limit 200
-uv run ashby_jobs.py --grep '\brust\b|\bgolang\b'    # search descriptions
-uv run test_ashby_jobs.py                            # offline self-check
+uv run job_boards.py --ats greenhouse --title "swe"  # one platform
+uv run job_boards.py --ats ashby,lever --all         # a subset
+uv run job_boards.py --title "software engineer"
+uv run job_boards.py --title "software engineer" --match exact
+uv run job_boards.py --title "product designer" --remote --limit 200
+uv run job_boards.py --grep '\brust\b|\bgolang\b'    # search descriptions
+uv run test_job_boards.py                            # offline self-check
 ```
 
 ## How complete is this?
 
-Measured, not estimated:
+Measured by a real `--refresh-boards --all`, not estimated:
 
-| | count |
-|---|---|
-| Boards discovered and validated live | **3,617** |
-| Jobs returned by `--all` | **54,560** |
-| Jobs on those boards, counted independently | 54,569 |
-| Difference | 9 unlisted postings, excluded on purpose |
+| platform | boards live | companies hiring | jobs |
+|---|---|---|---|
+| Ashby | 3,617 | 3,289 | 54,591 |
+| Greenhouse | 6,797 | 5,660 | 180,915 |
+| Lever | 2,718 | 2,113 | 72,594 |
+| **total** | **13,132** | **11,062** | **308,100** |
+
+A full `--refresh-boards --all` took **26 minutes** — most of it discovery, which later
+runs skip. Note the board/company gap: ~2,000 boards are real customers with nothing
+currently listed, which is expected and not an error.
 
 So it gets **every listed job on every board it knows about**. The honest limit is the
-board list, not the scraping — and there is no authoritative list of Ashby customers to
+board list, not the scraping — and no vendor publishes a list of its customers to
 check against, so completeness cannot be proven, only bounded.
 
 Where boards can still be missed:
@@ -89,10 +83,10 @@ Where boards can still be missed:
   from 191k archived URLs. To stop that from costing you anything, `--refresh-boards`
   unions its results with `boards.seed.json` and the previous `boards.json`, so a refresh
   never loses a board an earlier run knew about.
-- **New Ashby customers** appear before the archive notices them — a median of 48 days
+- **New customers of any of these platforms** appear before the archive notices them — a median of 48 days
   before, measured above. Re-run `--refresh-boards` monthly, or add the slug by hand.
 - **The shape filter** drops candidates that cannot be slugs. Sampling 150 of the 2,463 it
-  rejected turned up zero real boards, so this looks safe, but it is a sample.
+  rejected on Ashby turned up zero real boards, so this looks safe, but it is a sample.
 
 If you find a board this misses, add it to `boards.seed.json` and it is permanent.
 
@@ -100,8 +94,8 @@ If you find a board this misses, add it to `boards.seed.json` and it is permanen
 
 Two independent clocks. Job data is live; the board list lags.
 
-**Jobs are real-time.** Every run hits Ashby's API directly — nothing is cached — so you
-get postings published hours ago. Measured across a full 54,572-job pull:
+**Jobs are real-time.** Every run hits each platform's API directly — nothing is cached —
+so you get postings published hours ago. Measured across a full 54,572-job Ashby pull:
 
 | posted within | jobs | share |
 |---|---|---|
@@ -110,10 +104,12 @@ get postings published hours ago. Measured across a full 54,572-job pull:
 | 30 days | 19,780 | 36.2% |
 | 90 days | 37,614 | 68.9% |
 
-Median posting age is 48 days. That is the shape of the job market, not scrape lag.
+Median posting age is 48 days. That is the shape of the job market, not scrape lag. These
+percentages were measured on Ashby; the freshness mechanism is identical on the other
+platforms, but the distribution has not been re-measured across all three.
 
-**Board discovery lags by ~48 days.** A company that adopts Ashby is invisible until the
-Internet Archive crawls its board. Comparing each board's first archive capture against
+**Board discovery lags by ~48 days.** A company that adopts any of these platforms is
+invisible until the Internet Archive crawls its board. Comparing each board's first archive capture against
 its oldest surviving posting:
 
 | percentile | lag before the archive first saw the board |
@@ -123,16 +119,16 @@ its oldest surviving posting:
 | p75 | 110 days |
 | p90 | 257 days |
 
-The archive is actively crawling — 348 of the 3,617 boards were captured within the last
-week, some the same day — but a brand-new customer typically waits about seven weeks to
+The archive is actively crawling — 348 of the 3,617 Ashby boards were captured within
+the last week, some the same day — but a brand-new customer typically waits about seven weeks to
 become discoverable.
 
 **Why the lag matters less than it looks.** A board only has to be discovered once; after
 that every scrape reads live data from it. The lag is a one-time cost per company, not a
-staleness tax on jobs, and it only applies to companies that adopted Ashby in the last
-couple of months. For the other ~3,600 it is already paid.
+staleness tax on jobs, and it only applies to companies that adopted their ATS in
+the last couple of months. For the other ~13,000 it is already paid.
 
-Practically: re-run `--refresh-boards` monthly (about 80 seconds). Running it daily buys
+Practically: re-run `--refresh-boards` monthly. Running it daily buys
 nothing, because the archive will not have moved. If you need one specific new company
 immediately, skip the archive entirely — add its slug to `boards.seed.json` and it is
 permanent from the next run.
@@ -163,8 +159,8 @@ puts the surrounding context in a `matched` column, so a hit can be judged witho
 opening the posting.
 
 ```bash
-uv run ashby_jobs.py --grep '\brust\b|\bgolang\b'          # description only
-uv run ashby_jobs.py --title engineer --grep '\bkubernetes\b'  # both must match
+uv run job_boards.py --grep '\brust\b|\bgolang\b'          # description only
+uv run job_boards.py --title engineer --grep '\bkubernetes\b'  # both must match
 ```
 
 `--title` and `--grep` are ANDed. Giving `--grep` alone drops the title filter entirely
@@ -181,27 +177,39 @@ descriptions are full of boilerplate that will catch you:
 That is an 18x false-positive rate with no visible symptom, so the script warns on stderr
 when a `--grep` pattern contains no `\b`.
 
-Only matched fragments are kept, never whole descriptions — the gzip and memory
-characteristics below are unchanged by `--grep`.
+Only matched fragments are kept, never whole descriptions.
+
+**Greenhouse costs ~26x more with `--grep`.** Ashby and Lever return descriptions whether
+or not you want them, so searching them is free. Greenhouse omits descriptions from its
+list endpoint and only returns them for `?content=true`, which takes one board from 25KB
+to 653KB gzipped — measured on `stripe`. The script requests content only when `--grep`
+is set, and warns when it does. A `--grep` sweep of every Greenhouse board is multiple
+gigabytes; scope it with `--ats` or `--limit` unless you mean it.
 
 Against the shipped 26 boards, `software engineer` returns **268** jobs fuzzy and **2**
 exact — pick accordingly.
 
 ## The database
 
-Every run also upserts into `ashby-jobs.db` (SQLite, stdlib, no setup). The CSV is a
+Every run also upserts into `job-boards.db` (SQLite, stdlib, no setup). The CSV is a
 snapshot of one query; the database accumulates across runs and is what lets you ask
 questions a snapshot can't answer.
 
-Rows are keyed on the Ashby posting UUID, with `first_seen` preserved and `last_seen`
-refreshed. Everything else is overwritten each run, since titles and locations do get
-edited in place on live postings. The exception is `matched`: a later title-only run
-won't blank out `--grep` context an earlier search found.
+Rows are keyed on **`(ats, id)`**, with `first_seen` preserved and `last_seen` refreshed.
+The composite key is deliberate: Greenhouse posting ids are integers while Ashby and Lever
+use UUIDs, so a bare `id` risks a collision that would silently overwrite one platform's
+posting with another's. Everything else is overwritten each run, since titles and
+locations do get edited in place on live postings. The exception is `matched`: a later
+title-only run won't blank out `--grep` context an earlier search found.
+
+Upgrading an older single-platform database is automatic — the table is rebuilt with the
+new key and every existing row is labelled `ats = 'ashby'`, preserving `first_seen` and
+`closed_at`.
 
 ```bash
-uv run ashby_jobs.py --title "software engineer"     # writes ashby-jobs.db
-uv run ashby_jobs.py --db ~/jobs.db                  # somewhere else
-uv run ashby_jobs.py --no-db                         # CSV/JSON only
+uv run job_boards.py --title "software engineer"     # writes job-boards.db
+uv run job_boards.py --db ~/jobs.db                  # somewhere else
+uv run job_boards.py --no-db                         # CSV/JSON only
 ```
 
 The run summary reports `N new, M already seen`, so a scheduled scrape tells you what
@@ -209,8 +217,11 @@ changed without diffing anything.
 
 ```sql
 -- postings that showed up in the last day
-SELECT company, title, jobUrl FROM jobs
+SELECT ats, company, title, jobUrl FROM jobs
 WHERE first_seen > datetime('now', '-1 day');
+
+-- how the platforms compare
+SELECT ats, COUNT(*) jobs, COUNT(DISTINCT company) companies FROM jobs GROUP BY ats;
 
 -- postings that have since disappeared (see the section below)
 SELECT company, title, first_seen, closed_at FROM jobs
@@ -262,18 +273,27 @@ establishes the baseline, the next detects what left.
 
 ## How it works
 
-Ashby's public API is **per-company**, keyed by a board slug, with no global search
-endpoint. So this is two phases.
+Every supported ATS publishes a **per-company** API keyed by a board slug, with no global
+search endpoint. So this is two phases, run per platform.
+
+| platform | posting API | archive domain(s) |
+|---|---|---|
+| Ashby | `api.ashbyhq.com/posting-api/job-board/{slug}` | `jobs.ashbyhq.com` |
+| Greenhouse | `boards-api.greenhouse.io/v1/boards/{slug}/jobs` | `boards.greenhouse.io`, `job-boards.greenhouse.io` |
+| Lever | `api.lever.co/v0/postings/{slug}?mode=json` | `jobs.lever.co` |
 
 **Phase 1 — discover slugs.** Query the **Wayback Machine's** CDX index for everything
-archived under `jobs.ashbyhq.com`, take the first path segment of each URL as a candidate
-slug, drop the ones that can't be slugs, then validate the rest against the posting API.
-Cached to `boards.json` and skipped on later runs unless `--refresh-boards`.
+archived under each platform's domains, take the first path segment of each URL as a
+candidate slug, drop the ones that can't be slugs, then validate the rest against that
+platform's posting API. Cached to `boards.json` and skipped on later runs unless
+`--refresh-boards`.
 
-A real run, end to end in about a minute:
+Measured funnels:
 
 ```
-191,117 archived URLs  ->  7,463 candidates  ->  5,000 plausible  ->  3,611 live boards
+ashby       191,117 archived URLs  ->  7,463 candidates  ->  3,617 live boards
+greenhouse  1,348,314              -> 14,430             ->  6,797 live boards
+lever       1,302,426              ->  8,681             ->  2,718 live boards
 ```
 
 Three details make that work:
@@ -289,24 +309,44 @@ Three details make that work:
   validating 5,000 candidates costs nothing. GET would have downloaded ~220KB per live
   board — most of a gigabyte purely to learn which slugs are real.
 
-**Phase 2 — fetch + filter.** Thread pool of 8 over the slugs. Keep jobs where `isListed`
-is true and the title matches. Because Phase 1 already validated, a healthy run sees zero
-404s; any that do appear get pruned from `boards.json` so the list self-corrects.
+**Phase 2 — fetch + filter.** Thread pool of 8 over every `(platform, slug)` pair. Each
+platform's response is run through a normaliser that maps it onto one row shape, so
+filters, CSV and SQLite stay platform-agnostic. Because Phase 1 already validated, a
+healthy run sees zero 404s; any that do appear get pruned from `boards.json`.
 
-Full scrape of all 3,611 boards for `software engineer`: **4,375 jobs in 25 seconds.**
+### Normalisation, and two traps
+
+| row field | Ashby | Greenhouse | Lever |
+|---|---|---|---|
+| `title` | `title` | `title` | **`text`** |
+| `location` | `location` | `location.name` | `categories.location` |
+| `employmentType` | `employmentType` | — | `categories.commitment` |
+| `isRemote` | `isRemote` | inferred from location | `workplaceType == "remote"` |
+| `publishedAt` | `publishedAt` ISO | `first_published` ISO | **`createdAt` epoch-ms** |
+| `jobUrl` | `jobUrl` | `absolute_url` | `hostedUrl` |
+| description | always present | opt-in, 26x bytes | always present |
+
+The two bolded cells are the ones that fail quietly. Reading `title` on Lever yields an
+empty column rather than an error, and treating its `createdAt` as ISO makes every Lever
+posting sort wrongly against the other two. Both are pinned by tests.
+
+Greenhouse exposes no remote flag on this endpoint, so `isRemote` is inferred from the
+location label containing "remote" — weaker than the other two, and worth knowing before
+you trust `--remote` there.
 
 ## Facts verified against live endpoints (2026-07-27)
 
 | Fact | Note |
 |---|---|
-| `GET api.ashbyhq.com/posting-api/job-board/{slug}` | 200, no auth |
-| Invalid slug | 404 — this is the validator |
-| Slugs are case-insensitive and may contain spaces | `A1%20Garage%20Door%20Service` → 200 |
-| `Accept-Encoding: gzip` | 1.73MB → 220KB, **8x**. Full run ≈130MB, not ≈1GB |
-| `includeCompensation=true` omitted | removes the `compensation` field; saves ~no bytes |
-| Descriptions are ~95% of the payload | read only for `--grep`, never accumulated |
-| `HEAD` on the posting API | 200 with a 0-byte body, or 404 — free validation |
-| Wayback CDX for `jobs.ashbyhq.com` | 191,117 URLs in 34s → **3,611 live boards** |
+| All three posting APIs | 200, no auth, no account |
+| Invalid slug, all three | 404 — this is the validator |
+| `HEAD`, all three | 200 with a 0-byte body — free validation |
+| Ashby slugs may contain spaces | `A1%20Garage%20Door%20Service` → 200 |
+| gzip, Ashby | 1.73MB → 220KB, **8x** |
+| gzip, Greenhouse | 317KB → 25KB, **12x** |
+| Greenhouse `?content=true` | 25KB → 653KB, **26x** — descriptions are opt-in |
+| Lever payload | a bare JSON array, not `{"jobs": [...]}` |
+| Wayback CDX | 191k (ashby) + 1.35M (greenhouse) + 1.30M (lever) URLs |
 | Posting data | live, uncached — 946 jobs published the same day |
 | Archive lag for a new board | median 48 days (p90 257) |
 | Common Crawl CDX | 502/504 on essentially every request; see below |
@@ -351,36 +391,44 @@ engineer-facing map — [architecture](openwiki/architecture/overview.md),
 [job scrape](openwiki/workflows/job-scrape.md),
 [data model](openwiki/architecture/data-model.md),
 [runbook](openwiki/operations/runbook.md), [testing](openwiki/testing.md).
-The whole tool is one file, `ashby_jobs.py`, ~330 lines, zero dependencies.
+The whole tool is one file, `job_boards.py`, zero dependencies. Per-platform differences
+live in the `SOURCES` table and the three `normalize_*` functions; everything else is
+platform-agnostic. Adding an ATS should mean one `SOURCES` entry and one normaliser, not
+changes scattered through the pipeline.
 
 **Before you run anything network-facing:**
 
 ```bash
-export ASHBY_SCRAPER_CONTACT="the-user@example.com"   # ask; do not invent an address
-uv run test_ashby_jobs.py                             # offline, no network, ~1s
-python3 test_ashby_jobs.py                            # same suite without uv (>= 3.9)
+export JOB_SCRAPER_CONTACT="the-user@example.com"   # ask; do not invent an address
+uv run test_job_boards.py                             # offline, no network, ~1s
+python3 test_job_boards.py                            # same suite without uv (>= 3.9)
 ```
 
 If `uv` is not on your `PATH`, use the second command — it runs the identical suite on
 any Python 3.9+, including macOS's system `python3`. Never report the tests as
 unrunnable without trying it.
 
-The test suite is the fast feedback loop — it covers every filter, the SQLite lifecycle
-and the archive-parsing paths without touching the network. Run it before and after any
-change. A full `--refresh-boards --all` takes ~2 minutes and downloads ~130MB; do not
-run it casually, and never in a loop.
+The test suite is the fast feedback loop — it covers every filter, all three normalisers,
+the SQLite lifecycle and the archive-parsing paths without touching the network. Run it
+before and after any change. A full `--refresh-boards --all` spans ~12,000 boards across
+three platforms; do not run it casually, and never in a loop. `--ats <one> --limit 10` is
+the cheap way to exercise a real request path.
 
 **Things that look like bugs but are load-bearing.** Each is pinned by a test; if you
 "fix" one, a test will fail and it is telling you the truth:
 
 | Looks wrong | Why it is correct |
 |---|---|
+| Lever reads `text`, not `title` | That is Lever's field name. Reading `title` gives an empty column, not an error |
+| Lever's `publishedAt` is converted from a number | `createdAt` is epoch **milliseconds**; left raw it sorts wrongly against the other platforms |
+| The primary key is `(ats, id)`, not `id` | Greenhouse ids are integers, Ashby/Lever UUIDs — a bare key risks silent cross-platform overwrites |
+| Greenhouse is queried without descriptions by default | `?content=true` is 26x the bytes; it is added only when `--grep` needs it |
 | Fuzzy match requires a ≥2-word title in the reverse direction | Without it, `--title "senior software engineer"` matches every job titled `Engineer` |
 | Only `--all` runs set `closed_at` | A filtered run cannot distinguish "gone" from "did not match my filter" |
-| Closing is scoped to boards actually scanned | Otherwise `--limit 10` would "close" postings at 3,600 unvisited companies |
-| Validation uses `HEAD`, not `GET` | `GET` would download ~220KB per board — near a gigabyte per refresh |
+| Closing is scoped to boards actually scanned | Otherwise `--limit 10` would "close" postings at thousands of unvisited companies |
+| Validation uses `HEAD`, not `GET` | `GET` would download hundreds of KB per board — gigabytes per refresh |
 | The User-Agent is stripped to ASCII | HTTP headers are latin-1; one em-dash made *every* request fail |
-| `boards.json` is gitignored, `boards.seed.json` is committed | A full crawl is effectively Ashby's customer list and must not be published |
+| `boards.json` is gitignored, `boards.seed.json` is committed | A full crawl is effectively three vendors' customer lists and must not be published |
 
 **Do not commit:** `boards.json`, `*.csv`, `*.json` outputs, `*.db`. `.gitignore` denies
 these by default and allows only `boards.seed.json`. If you add an output format, add it
@@ -400,18 +448,60 @@ it. Keep that warning.
 ## Skipped, and when to add
 
 - **Merging Wayback with Common Crawl** — the union would add slugs one index missed.
-  Wayback alone already validates 3,611 boards, so this buys little for double the crawl.
+  Wayback alone already validates thousands per platform, so this buys little.
 - **Token title matching** — fuzzy still misses "Software Development Engineer", where
   the words are present but not contiguous. `--grep` covers most of this need already.
 - **Per-board caching** — postings change daily; caching mostly serves staleness.
-- **Rate-limit backoff for Ashby** — no 429s observed. Add on first sighting.
+- **Rate-limit backoff** — no 429s observed on any platform. Add on first sighting.
+- **More ATS platforms** — SmartRecruiters and Workable expose similar public APIs and
+  would each be one `SOURCES` entry plus a normaliser. Workday is per-tenant and would
+  need real work.
+
+## Keeping the wiki in sync
+
+`openwiki/` is generated, and it goes stale fast — last time code moved without it, four
+of its claims were wrong within the hour, including its own note about not being able to
+run the tests.
+
+Two workflows in `.github/workflows/` handle that:
+
+| workflow | trigger | what it does |
+|---|---|---|
+| `openwiki-pr-sync.yml` | a PR touching `job_boards.py`, `README.md`, tests or the seed | regenerates the wiki and pushes the result onto the PR branch |
+| `openwiki-update.yml` | manual (`workflow_dispatch`) | full refresh, opens a PR with the result |
+
+Both need an `OPENROUTER_API_KEY` secret and are **inert without it** — the PR sync gates
+on the key and skips with a note rather than failing, so a fork or an unconfigured clone
+sees a green check instead of a red X on every pull request.
+
+```bash
+gh secret set OPENROUTER_API_KEY   # then the PR sync starts working
+```
+
+Three details in the PR sync are deliberate, since it runs with `contents: write`:
+
+- The `paths:` filter excludes `openwiki/`, and the commit it pushes touches only
+  `openwiki/` — so the job cannot retrigger itself and loop.
+- `actions/checkout` takes `head.sha`, never `head.ref`. Branch names are
+  attacker-controlled text and must not reach a `ref:`.
+- The branch name is passed to the push step through `env:`, so a branch called `$(...)`
+  cannot execute. No `github.event` value is interpolated into any `run:` block, and all
+  actions are pinned to commit SHAs.
+
+Fork PRs are skipped entirely: they receive no secrets and must not be pushed to.
+
+You can always regenerate by hand:
+
+```bash
+openwiki --update
+```
 
 ## Being a good citizen
 
-This reads only Ashby's public, unauthenticated posting API — the same data any visitor
+This reads only public, unauthenticated posting APIs — the same data any visitor
 sees on a company's job board page. Requests are capped at 8 concurrent, Common Crawl is
 throttled to their stated 1/second, and every request identifies itself via
-`ASHBY_SCRAPER_CONTACT`. Please keep it that way if you fork.
+`JOB_SCRAPER_CONTACT`. Please keep it that way if you fork.
 
 ## License
 
