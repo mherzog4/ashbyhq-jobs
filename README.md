@@ -42,8 +42,9 @@ Every row carries an `ats` column, so one CSV and one database cover all three p
 and you can slice by platform or ignore it entirely.
 
 Later runs reuse `boards.json`, so a re-scrape is just `uv run job_boards.py --all`.
-Re-run `--refresh-boards` about monthly — see
-[How recent is the data?](#how-recent-is-the-data) for why more often buys nothing.
+Re-run `--refresh-boards` monthly, or `--refresh-recent` daily — see
+[How recent is the data](#how-recent-is-the-data--and-how-to-make-it-fresher), which also
+covers `--since` for a fresher dataset.
 
 ### Narrower searches
 
@@ -54,6 +55,8 @@ uv run job_boards.py --title "software engineer"
 uv run job_boards.py --title "software engineer" --match exact
 uv run job_boards.py --title "product designer" --remote --limit 200
 uv run job_boards.py --grep '\brust\b|\bgolang\b'    # search descriptions
+uv run job_boards.py --all --since 7d                # only the last week's postings
+uv run job_boards.py --all --new-only                # only what the db has not seen
 uv run test_job_boards.py                            # offline self-check
 ```
 
@@ -90,27 +93,54 @@ Where boards can still be missed:
 
 If you find a board this misses, add it to `boards.seed.json` and it is permanent.
 
-## How recent is the data?
+## How recent is the data — and how to make it fresher
 
-Two independent clocks. Job data is live; the board list lags.
+Every run hits each platform's API directly, so the *data* is live. But the median
+posting in a full pull is **62 days old**, because companies leave requisitions listed:
 
-**Jobs are real-time.** Every run hits each platform's API directly — nothing is cached —
-so you get postings published hours ago. Measured across a full 54,572-job Ashby pull:
+| ats | jobs | median age | >1yr | >3yr | oldest |
+|---|---|---|---|---|---|
+| ashby | 54,591 | 48d | 3.9% | 0.3% | 2,484d |
+| greenhouse | 180,915 | 60d | 13.0% | 1.8% | 2,776d |
+| lever | 72,594 | **97d** | **26.2%** | **14.1%** | **6,078d** |
+| **all** | 308,100 | **62d** | 15.6% | 5.1% | — |
 
-| posted within | jobs | share |
-|---|---|---|
-| today | 946 | 1.7% |
-| 7 days | 6,754 | 12.4% |
-| 30 days | 19,780 | 36.2% |
-| 90 days | 37,614 | 68.9% |
+That tail is real upstream data, not a parsing bug. Palantir's Lever board carries a
+"Forward Deployed Software Engineer" with `createdAt` **2009-12-05** — verified against
+the raw API. Lever boards accumulate the most evergreen postings by a wide margin.
 
-Median posting age is 48 days. That is the shape of the job market, not scrape lag. These
-percentages were measured on Ashby; the freshness mechanism is identical on the other
-platforms, but the distribution has not been re-measured across all three.
+**You cannot lower the age of what exists, only choose what to collect.** Two flags do
+that, and they catch different things:
 
-**Board discovery lags by ~48 days.** A company that adopts any of these platforms is
-invisible until the Internet Archive crawls its board. Comparing each board's first archive capture against
-its oldest surviving posting:
+```bash
+uv run job_boards.py --all --since 7d     # published in the last week
+uv run job_boards.py --all --new-only     # never seen by the database before
+uv run job_boards.py --all --since 30d --new-only
+```
+
+`--since` accepts `7d`, `2w`, `3m`, `1y`, or a bare number of days:
+
+| `--since` | jobs | share | median age |
+|---|---|---|---|
+| 7d | 35,490 | 11.5% | **4.0d** |
+| 14d | 58,294 | 18.9% | 6.0d |
+| 30d | 95,780 | 31.1% | 12.0d |
+| 90d | 183,228 | 59.5% | 27.0d |
+| (none) | 308,100 | 100% | 62.0d |
+
+`--new-only` catches what `--since` cannot: a 200-day-old requisition that only appeared
+on a board today, or one on a board you only just discovered. It compares against the
+`(ats, id)` keys already in the database, so it needs the database and errors with
+`--no-db`.
+
+**Neither ever marks a posting closed.** A run that filtered did not see what it filtered
+out, so it cannot conclude those postings are gone — the same rule that already applies to
+`--title` and `--grep`. Without it, one `--all --since 7d` would close everything older
+than a week.
+
+**Board discovery lags by ~48 days.** Separately from posting age: a company that adopts
+any of these platforms is invisible until the Internet Archive crawls its board. Comparing
+each board's first archive capture against its oldest surviving posting:
 
 | percentile | lag before the archive first saw the board |
 |---|---|
@@ -128,10 +158,29 @@ that every scrape reads live data from it. The lag is a one-time cost per compan
 staleness tax on jobs, and it only applies to companies that adopted their ATS in
 the last couple of months. For the other ~13,000 it is already paid.
 
-Practically: re-run `--refresh-boards` monthly. Running it daily buys
-nothing, because the archive will not have moved. If you need one specific new company
-immediately, skip the archive entirely — add its slug to `boards.seed.json` and it is
-permanent from the next run.
+### Closing the discovery gap: `--refresh-recent`
+
+The archive is thorough but slow. urlscan.io indexes scans people ran *today*, so it
+surfaces boards the archive has not reached yet — a measured run added 14 boards a full
+Wayback crawl had missed, including `headway`, `lab37` and `eltropyinc`.
+
+| | `--refresh-boards` | `--refresh-recent` |
+|---|---|---|
+| Wayback | full crawl, 2.9M URLs | last 30 days only, ~17k URLs |
+| urlscan.io | — | recent public scans |
+| runtime | ~26 min | **~4 min** |
+| cadence | monthly | daily |
+
+```bash
+uv run job_boards.py --refresh-recent --all --since 7d   # a daily fresh-jobs run
+```
+
+It is purely additive — a measured run went 13,132 → 13,146 boards and lost none, because
+discovery unions with the seed and the previous cache. urlscan's anonymous API allows 30
+searches/minute and this makes four, so no key is needed.
+
+If you need one specific new company immediately, skip discovery entirely — add its slug
+to `boards.seed.json` and it is permanent from the next run.
 
 ## Match modes
 
@@ -348,7 +397,9 @@ you trust `--remote` there.
 | Lever payload | a bare JSON array, not `{"jobs": [...]}` |
 | Wayback CDX | 191k (ashby) + 1.35M (greenhouse) + 1.30M (lever) URLs |
 | Posting data | live, uncached — 946 jobs published the same day |
-| Archive lag for a new board | median 48 days (p90 257) |
+| Archive lag for a new board | median 48 days (p90 257) — distinct from posting age |
+| urlscan.io | newest scan 1 day old; 30 searches/min anonymous |
+| Median posting age | 62 days across all three; Lever alone is 97 |
 | Common Crawl CDX | 502/504 on essentially every request; see below |
 
 ## Why Common Crawl is only the fallback
@@ -420,6 +471,7 @@ the cheap way to exercise a real request path.
 
 | Looks wrong | Why it is correct |
 |---|---|
+| `--since`/`--new-only` never set `closed_at` | A filtered run did not see what it skipped, so it cannot call those postings gone |
 | Lever reads `text`, not `title` | That is Lever's field name. Reading `title` gives an empty column, not an error |
 | Lever's `publishedAt` is converted from a number | `createdAt` is epoch **milliseconds**; left raw it sorts wrongly against the other platforms |
 | The primary key is `(ats, id)`, not `id` | Greenhouse ids are integers, Ashby/Lever UUIDs — a bare key risks silent cross-platform overwrites |
@@ -441,6 +493,12 @@ README and let OpenWiki regenerate them (`openwiki --update`).
 **Network etiquette is a requirement, not a style preference.** Concurrency is capped at
 8, Common Crawl is throttled to its stated 1 request/second, and every request identifies
 itself. Do not raise these to make something finish faster.
+
+**If you add a filter,** add it to `may_close_postings()` in the same change. That one
+function decides whether a run is entitled to mark postings closed, and a filter missing
+from it silently corrupts the fill-rate signal — `--all --since 7d` would close every
+posting older than a week. It is pinned by
+`test_only_an_unfiltered_run_may_close_postings`.
 
 **If you are adding a search mode,** note that `--grep` patterns without `\b` are a
 documented footgun (`rust` matches "t**rust**": 1350 hits vs 72). The script warns about

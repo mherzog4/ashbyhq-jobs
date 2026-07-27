@@ -32,6 +32,10 @@ uv run job_boards.py --refresh-boards --all
 # Later full scrape using cached boards.
 uv run job_boards.py --all
 
+# Daily freshness-oriented run: recent board discovery plus recent postings.
+uv run job_boards.py --refresh-recent --all --since 7d
+uv run job_boards.py --all --new-only
+
 # Platform-specific or targeted searches.
 uv run job_boards.py --ats greenhouse --title "swe"
 uv run job_boards.py --ats ashby,lever --all
@@ -43,11 +47,11 @@ uv run test_job_boards.py
 python3 test_job_boards.py  # fallback when uv is unavailable and Python is 3.9+
 ```
 
-The README recommends monthly board refreshes because board discovery depends on archive coverage and has measured lag. Jobs themselves are live on every scrape because the scan phase reads each platform's posting API directly.
+The README recommends monthly full `--refresh-boards` runs because board discovery depends on archive coverage and has measured lag. For fresher daily discovery, `--refresh-recent` reads the last 30 days of Wayback captures and urlscan.io public scans; it is additive to the seed and cache, not a replacement for periodic full refresh. Jobs themselves are live on every scrape because the scan phase reads each platform's posting API directly, while `--since` and `--new-only` narrow which live postings are written.
 
 ## Persistence and scheduling
 
-Schedule unfiltered `--all` runs if you want the SQLite database to become a fill-rate or disappearance signal. The [data model](../architecture/data-model.md) only stamps `closed_at` after an unfiltered run has covered a board and omitted a previously seen posting. Filtered searches update matching postings but cannot prove that non-matching postings disappeared.
+Schedule unfiltered `--all` runs if you want the SQLite database to become a fill-rate or disappearance signal. The [data model](../architecture/data-model.md) only stamps `closed_at` after an unfiltered run has covered a board and omitted a previously seen posting. Filtered searches, including `--since` and `--new-only`, update matching postings but cannot prove that non-matching postings disappeared.
 
 Useful database questions from the README include new postings in the last day, platform comparison through the `ats` column, currently open roles (`closed_at IS NULL`), recently closed roles, and companies filling roles quickly.
 
@@ -71,6 +75,8 @@ This is more than cleanup. A full generated `boards.json` is effectively three v
 | Board discovery fails entirely | Wayback and Common Crawl unreachable. | Use the committed seed or existing cache; discovery is optional for a fresh clone. |
 | Many board scan errors | A platform API shape or network behavior may have changed. | Inspect stderr, run tests, and verify `scan_board()` still receives the jobs list shape expected by the platform adapter. |
 | Greenhouse `--grep` is unexpectedly slow or large | Greenhouse descriptions require `?content=true`, which is much larger than normal list payloads. | Scope with `--ats`, `--limit`, or a smaller board set unless a full Greenhouse description sweep is intended. |
+| `--new-only` exits before scanning | It needs SQLite history and was combined with `--no-db`. | Keep the database enabled or drop `--new-only`. |
+| `--since` returns fewer rows than expected | Missing, malformed, or older `publishedAt` values are excluded because freshness must be provable. | Use a wider duration or an unfiltered `--all` run when completeness matters. |
 | `uv` is missing from `PATH` | Minimal local or agent environment. | Run `python3 test_job_boards.py`; the source keeps the offline suite working on Python 3.9+. |
 
 ## OpenWiki automation

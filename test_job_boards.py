@@ -7,6 +7,7 @@
 
 import csv
 import io
+from datetime import datetime, timezone
 import json
 import re
 import sqlite3
@@ -501,6 +502,98 @@ def test_closing_is_scoped_to_boards_actually_scanned():
         assert got["ashby"] is not None
         assert got["greenhouse"] is None, \
             "same company name on another platform must be left alone"
+
+
+def test_only_an_unfiltered_run_may_close_postings():
+    """The highest-risk rule in the tool.
+
+    closed_at means "this posting is gone". A run that filtered did not see the
+    postings it filtered out, so it cannot make that claim. Miss one filter here and
+    `--all --since 7d` silently marks everything older than a week as closed,
+    destroying the fill-rate signal with no visible symptom.
+    """
+    from datetime import timedelta
+    from job_boards import may_close_postings
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+
+    assert may_close_postings(None, None, None, False), "a bare --all sees everything"
+
+    assert not may_close_postings("engineer", None, None, False), "--title filters"
+    assert not may_close_postings(None, re.compile("rust"), None, False), "--grep filters"
+    assert not may_close_postings(None, None, cutoff, False), "--since filters"
+    assert not may_close_postings(None, None, None, True), "--new-only filters"
+    assert not may_close_postings("engineer", None, cutoff, True), "combinations filter"
+
+
+def test_parse_duration():
+    from job_boards import parse_duration
+    assert parse_duration("7d") == 7
+    assert parse_duration("2w") == 14
+    assert parse_duration("3m") == 90
+    assert parse_duration("1y") == 365
+    assert parse_duration("90") == 90, "a bare number means days"
+    assert parse_duration(" 7D ") == 7
+    for junk in ("", "d", "-7", "7 days", "soon", "7x"):
+        try:
+            parse_duration(junk)
+            raise AssertionError(f"{junk!r} should not parse")
+        except ValueError:
+            pass
+
+
+def test_published_within_boundaries():
+    from datetime import timedelta
+    from job_boards import published_within
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=7)
+    assert published_within((now - timedelta(days=1)).isoformat(), cutoff)
+    assert published_within((now - timedelta(days=6, hours=23)).isoformat(), cutoff)
+    assert not published_within((now - timedelta(days=8)).isoformat(), cutoff)
+    # a Lever-style very old posting
+    assert not published_within("2009-12-05T00:00:00+00:00", cutoff)
+    # missing or malformed dates are excluded: --since promises freshness, so the
+    # safe direction is to drop what cannot be shown to be fresh
+    assert not published_within("", cutoff)
+    assert not published_within("not a date", cutoff)
+
+
+def test_since_filters_by_publish_date():
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    board = {"jobs": [
+        {"id": "fresh", "title": "A", "isListed": True,
+         "publishedAt": (now - timedelta(days=2)).isoformat()},
+        {"id": "stale", "title": "B", "isListed": True,
+         "publishedAt": (now - timedelta(days=400)).isoformat()},
+    ]}
+    cutoff = now - timedelta(days=7)
+    rows = _with_fetch(board, lambda: scan_board(
+        "ashby", "acme", None, False, "fuzzy", None, cutoff))
+    assert [r["id"] for r in rows] == ["fresh"]
+    # without a cutoff both survive
+    both = _with_fetch(board, lambda: scan_board("ashby", "acme", None, False, "fuzzy"))
+    assert len(both) == 2
+
+
+def test_known_keys_reads_existing_and_legacy_databases():
+    from job_boards import known_keys, save
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        assert known_keys(db) == set(), "a missing database has no known keys"
+        save([BASE | {"ats": "lever", "id": "x", "company": "acme"}], db,
+             "2026-01-01T00:00:00+00:00")
+        assert known_keys(db) == {("lever", "x")}
+
+        # a pre-multi-ATS database has no ats column; its rows are all Ashby
+        legacy = Path(tmp) / "legacy.db"
+        con = sqlite3.connect(legacy)
+        con.executescript(
+            "CREATE TABLE jobs (id TEXT PRIMARY KEY, company TEXT,"
+            " first_seen TEXT, last_seen TEXT);"
+        )
+        con.execute("INSERT INTO jobs VALUES ('old','acme','t','t')")
+        con.commit(); con.close()
+        assert known_keys(legacy) == {("ashby", "old")}
 
 
 def test_db_skips_rows_without_an_id():

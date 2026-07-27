@@ -70,7 +70,7 @@ The table is created by `_create_table()` in `/job_boards.py` with primary key `
 
 Rows are keyed by `(ats, id)`. Rows without an `id` are skipped. The composite key is deliberate: Greenhouse posting ids are integers while Ashby and Lever use UUID-like ids, so a bare `id` risks collisions across platforms. On conflict, `first_seen` is preserved, `last_seen` is refreshed to the current run timestamp, and most fields are overwritten because upstream titles, locations, and other posting metadata can change in place.
 
-`matched` is the exception. If a later run has an empty `matched` value, it does not erase grep context found by an earlier `--grep` run. A later run with non-empty `matched` does update the stored context.
+`matched` is the exception. If a later run has an empty `matched` value, it does not erase grep context found by an earlier `--grep` run. A later run with non-empty `matched` does update the stored context. `--new-only` reads existing `(ats, id)` keys through `known_keys()` before saving, so its output contains only rows absent from the database; legacy pre-multi-ATS databases are treated as Ashby keys during that lookup.
 
 Opening a pre-multi-ATS database triggers a rebuild because SQLite cannot alter a primary key in place. `_prepare()` labels every existing row as `ats = 'ashby'`, carries forward compatible columns including `closed_at`, drops the old table, and renames the rebuilt table. Older databases that only lack `closed_at` get that column added before indexes are created.
 
@@ -86,10 +86,10 @@ stateDiagram-v2
     Closed --> SeenAgain: posting reappears
 ```
 
-A missing posting only means closed when the run was exhaustive for that board. `main()` passes `covered=scanned` to `save()` only when there is no title filter and no grep pattern. Filtered runs pass `covered=None`, so they never stamp `closed_at`. This rule is central to the [operations runbook](../operations/runbook.md): schedule `--all` if you want fill-rate or disappearance signals.
+A missing posting only means closed when the run was exhaustive for that board. `main()` passes `covered=scanned` to `save()` only when `may_close_postings()` sees no title filter, grep pattern, since cutoff, or new-only filter. Filtered runs pass `covered=None`, so they never stamp `closed_at`. This rule is central to the [operations runbook](../operations/runbook.md): schedule unfiltered `--all` if you want fill-rate or disappearance signals.
 
 Closing is scoped to `(ats, company)` pairs actually scanned. If `--limit` scanned only one platform's first boards, jobs on skipped boards or other platforms must not be closed. Tests exercise filtered runs, scoped closing, and reopening when a previously closed posting reappears.
 
 ## Change guidance
 
-Any schema or lifecycle change should be made with tests first or alongside source changes. Update [testing](../testing.md) for upsert preservation, migration from older databases, filtered-run safety, and reopen behavior. Update [operations](../operations/runbook.md) if SQL examples, output filenames, or scheduling advice change.
+Any schema or lifecycle change should be made with tests first or alongside source changes. Update [testing](../testing.md) for upsert preservation, migration from older databases, filtered-run safety, `may_close_postings()` coverage, and reopen behavior. Update [operations](../operations/runbook.md) if SQL examples, output filenames, or scheduling advice change.

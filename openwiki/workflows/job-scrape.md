@@ -18,6 +18,8 @@ This workflow consumes slugs from [board discovery](board-discovery.md), calls e
 - `--title` filters titles. If no narrowing option is supplied, the default title is `software engineer`.
 - `--grep REGEX` searches descriptions with a case-insensitive regex. If `--grep` is supplied without `--title`, the title filter is dropped instead of silently ANDing the default title.
 - `--title` and `--grep` together are ANDed.
+- `--since AGE` keeps postings whose normalized `publishedAt` parses at or after the cutoff from `parse_duration()`. Accepted forms are `7d`, `2w`, `3m`, `1y`, or a bare day count; missing or malformed dates are excluded because the flag promises freshness.
+- `--new-only` removes rows whose `(ats, id)` already exists in SQLite via `known_keys()`. It is applied after board fetches so scanning stays storage-independent, and it exits early when combined with `--no-db`.
 - `--remote` keeps only jobs whose normalized `isRemote` value is truthy. Ashby provides a remote flag, Greenhouse infers it from the location label, and Lever uses `workplaceType == "remote"`.
 - `--limit` scans only the first N loaded boards per platform.
 - `--concurrency` controls the thread-pool size and defaults to 8.
@@ -33,7 +35,8 @@ flowchart TD
     Shape -->|"yes"| Adapter["normalize platform job"]
     Adapter --> Listed["skip adapter-rejected jobs"]
     Listed --> Title["apply title match if present"]
-    Title --> Remote["apply remote filter if requested"]
+    Title --> Fresh["apply since cutoff if present"]
+    Fresh --> Remote["apply remote filter if requested"]
     Remote --> Grep{"grep pattern present"}
     Grep -->|"yes"| Text["strip description markup"]
     Text --> Fragments["keep up to two match fragments"]
@@ -42,7 +45,9 @@ flowchart TD
     Row --> Outputs["CSV JSON and optional SQLite"]
 ```
 
-`scan_board()` implements the branch logic and `main()` writes the outputs.
+This flow shows the per-board filtering path before `main()` applies database-backed `--new-only` filtering.
+
+`scan_board()` implements the branch logic through description matching; `main()` then applies `--new-only` against SQLite before writing outputs.
 
 ## Platform adapters
 
@@ -81,14 +86,14 @@ Payload shape failures are not swallowed by `scan_board()`; missing or non-list 
 
 ## Output writing
 
-Rows are sorted by `ats`, lowercased company, and lowercased title, then written to:
+After optional `--new-only` filtering, rows are sorted by `ats`, lowercased company, and lowercased title, then written to:
 
 - `${out}.csv` using UTF-8 with BOM so Excel handles punctuation in locations.
 - `${out}.json` as indented JSON rows.
 - The SQLite database unless `--no-db` is set.
 
-Only an unfiltered run passes its scanned `(ats, slug)` list as coverage to `save()`. That link to [data model](../architecture/data-model.md) is what allows disappearance tracking without confusing filtered misses for closed postings.
+Only a run with no title, grep, since cutoff, or new-only filter passes its scanned `(ats, slug)` list as coverage to `save()`. That link to the [data model](../architecture/data-model.md) is what allows disappearance tracking without confusing filtered misses for closed postings.
 
 ## Change guidance
 
-When adding a filter, decide whether it narrows coverage. If it does, it should probably prevent closing missing postings just like title and grep filters. When adding an ATS, add a `SOURCES` entry, a normalizer that fills the shared `FIELDS`, seed entries where useful, and tests in [testing](../testing.md) for URL construction, normalization, row shape, and expensive-description behavior.
+When adding a filter, decide whether it narrows coverage and update `may_close_postings()` in the same change. If it does, it should prevent closing missing postings just like title, grep, since, and new-only filters. When adding an ATS, add a `SOURCES` entry, a normalizer that fills the shared `FIELDS`, seed entries where useful, and tests in [testing](../testing.md) for URL construction, normalization, row shape, and expensive-description behavior.
