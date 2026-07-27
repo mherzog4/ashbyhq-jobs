@@ -14,3 +14,6 @@ __pycache__/
 # Scrape database.
 *.db
 *.db-journal
+
+# OpenWiki scratch: a per-run planning file, not documentation.
+openwiki/_plan.md

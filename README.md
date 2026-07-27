@@ -1,4 +1,4 @@
-# ashbyhq-jobs
+# job-boards
 
 Pull every public job posting from every **Ashby, Greenhouse and Lever** job board.
 No API key, no account, no dependencies.
@@ -18,8 +18,8 @@ No dataset is bundled; you generate your own. The only prerequisite is
 fetches its own Python.
 
 ```bash
-git clone https://github.com/mherzog4/ashbyhq-jobs.git
-cd ashbyhq-jobs
+git clone https://github.com/mherzog4/job-boards.git
+cd job-boards
 
 # Identify your traffic. Archive operators ask clients to do this, and it puts
 # your address on your requests rather than someone else's.
