@@ -579,6 +579,43 @@ Both workflows keep `actions/checkout` on `head.sha` rather than a branch name, 
 every untrusted value through `env:` instead of interpolating it into a `run:` block, and
 pin all actions to commit SHAs. The drift check runs with `contents: read` only.
 
+## Performance
+
+The tool is network-bound: json parsing and normalisation are **0.2%** of a run. So the
+only levers are how many round trips it makes and how many connections it opens.
+
+**Connections are pooled per thread.** Every posting-API request used to open a fresh
+TLS connection — 13,146 handshakes in a full run. Now each of the 8 workers keeps one
+connection per host open:
+
+| | connections (300 boards) | full `--since 1d` run |
+|---|---|---|
+| before | 300 | 6m 35s |
+| after | **23** | **3m 51s** |
+| | 13x fewer | **41% faster** |
+
+Measured by alternating A/B over 4 rounds, because wall clock on a network-bound tool
+has ~56% run-to-run spread and a single comparison is not evidence. Pooling won every
+round.
+
+This is also the polite direction: 13x fewer TLS handshakes is less work for Ashby,
+Greenhouse and Lever, not more. **Raising `--concurrency` is not on the table** — 8 is a
+requirement, not a tunable, and it is the one knob that would speed things up by pushing
+cost onto someone else's servers.
+
+### Known, unexploited: conditional requests
+
+All three APIs return `ETag` and honour `If-None-Match` with a `304`. On a repeat pass an
+unchanged board could cost a few hundred bytes instead of up to 220KB. This is not
+implemented, because a `304` returns no body and a full dump needs the rows — it only
+pays off combined with `--new-only`, where an unchanged board can be skipped outright.
+That is the largest remaining win for scheduled runs.
+
+Worth knowing if you implement it: the three APIs disagree on header casing. Ashby and
+Greenhouse send `etag`, Lever sends `ETag`. Looking one up case-sensitively silently
+returns nothing, which is exactly the mistake that made a first measurement here report
+1 of 3 platforms supporting `304` when all 3 do.
+
 ## Being a good citizen
 
 This reads only public, unauthenticated posting APIs — the same data any visitor

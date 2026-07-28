@@ -32,11 +32,13 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import http.client
 import json
 import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 import urllib.error
@@ -100,33 +102,110 @@ class RateLimited(Exception):
     too high; a repeatedly-abusive IP can be blocked for 24 hours."""
 
 
+# Hosts whose connections are pooled. Only the posting APIs: they take one request
+# per board — over 13,000 in a full run — and a fresh TLS handshake for each was
+# measured at 102ms against 64ms on a reused connection. Everything else (the
+# archives, urlscan) is a handful of requests per run and may redirect, which
+# urlopen handles and a raw connection would not, so those stay on urlopen.
+_POOLED_HOSTS = {
+    "api.ashbyhq.com",
+    "boards-api.greenhouse.io",
+    "api.lever.co",
+}
+# One connection per thread per host. Sharing across threads would need a lock and
+# serialise the pool; a thread-local dict keeps the 8 workers independent, so a full
+# run opens ~8 connections per host rather than one per board.
+_CONNECTIONS = threading.local()
+
+
+def _lower_headers(items) -> dict:
+    """Lowercase header names.
+
+    urlopen returns an email.message.Message, which looks keys up case-insensitively.
+    A plain dict does not, so the pooled path has to normalise or a vendor changing
+    `Content-Encoding` to `content-encoding` would silently skip gunzipping and hand
+    back compressed bytes. Not hypothetical: these three APIs already disagree about
+    the casing of `ETag`.
+    """
+    return {k.lower(): v for k, v in (items.items() if hasattr(items, "items") else items)}
+
+
+def _pooled_request(url: str, method: str, timeout: int) -> tuple[int, dict, bytes]:
+    """One request over a reused per-thread connection. Returns (status, headers, body).
+
+    A pooled connection can be closed by the server between requests, which surfaces
+    as an exception on the next use rather than at close time, so a dead connection is
+    dropped and retried once before giving up.
+    """
+    parts = urllib.parse.urlsplit(url)
+    pool = getattr(_CONNECTIONS, "pool", None)
+    if pool is None:
+        pool = _CONNECTIONS.pool = {}
+    target = parts.path + (f"?{parts.query}" if parts.query else "")
+
+    for attempt in (0, 1):
+        conn = pool.get(parts.netloc)
+        if conn is None:
+            conn = pool[parts.netloc] = http.client.HTTPSConnection(
+                parts.netloc, timeout=timeout
+            )
+        try:
+            conn.request(method, target, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
+            resp = conn.getresponse()
+            body = resp.read()  # must drain, or the connection cannot be reused
+            return resp.status, _lower_headers(resp.getheaders()), body
+        except (http.client.HTTPException, OSError):
+            try:
+                conn.close()
+            except Exception:
+                pass
+            pool.pop(parts.netloc, None)
+            if attempt:
+                raise
+    raise RuntimeError("unreachable")
+
+
+def _single_request(url: str, method: str, timeout: int) -> tuple[int, dict, bytes]:
+    """One request, pooled where that is safe and via urlopen everywhere else."""
+    if urllib.parse.urlsplit(url).netloc in _POOLED_HOSTS:
+        return _pooled_request(url, method, timeout)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"}, method=method
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, _lower_headers(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, _lower_headers(e.headers or {}), e.read()
+
+
 def fetch(url: str, timeout: int = 30, retries: int = 4, method: str = "GET") -> bytes:
     """GET a URL, transparently gunzipping. Raises NotFound on 404.
 
     Common Crawl's CDX index 502/504s under load often enough that a single
     attempt fails maybe half the time, so 5xx gets exponential backoff.
     """
-    req = urllib.request.Request(
-        url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"}, method=method
-    )
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read()
-                if resp.headers.get("Content-Encoding") == "gzip":
-                    body = gzip.decompress(body)
-                return body
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise NotFound(url) from e
-            if e.code == 503:
-                raise RateLimited(url) from e
-            if e.code < 500 or attempt == retries - 1:
-                raise
-        except (urllib.error.URLError, TimeoutError):
+            status, headers, body = _single_request(url, method, timeout)
+            if status == 404:
+                raise NotFound(url)
+            if status == 503:
+                raise RateLimited(url)
+            if status >= 500:
+                if attempt == retries - 1:
+                    raise urllib.error.HTTPError(url, status, "server error", None, None)
+                time.sleep(2**attempt)
+                continue
+            if status >= 400:
+                raise urllib.error.HTTPError(url, status, "client error", None, None)
+            if headers.get("content-encoding") == "gzip":
+                body = gzip.decompress(body)
+            return body
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError):
             if attempt == retries - 1:
                 raise
-        time.sleep(2**attempt)
+            time.sleep(2**attempt)
     raise RuntimeError("unreachable")
 
 

@@ -100,6 +100,83 @@ def test_root_prefix_is_only_junk_for_ashby():
     assert plausible("root.abc", "greenhouse")
 
 
+def test_every_posting_api_host_is_pooled():
+    """A new ATS added without pooling silently loses the connection reuse.
+
+    Pooling cut connections for a 300-board sample from 300 to 23 and wall clock by
+    ~19-29%. That win is per-host, so an adapter whose host is missing from
+    _POOLED_HOSTS quietly opts out of it.
+    """
+    import urllib.parse
+    from job_boards import SOURCES, _POOLED_HOSTS, board_url
+    for ats in SOURCES:
+        host = urllib.parse.urlsplit(board_url(ats, "example")).netloc
+        assert host in _POOLED_HOSTS, f"{ats} posting API host {host} is not pooled"
+
+
+def test_header_lookup_is_case_insensitive():
+    """urlopen returned a case-insensitive Message; a plain dict is not.
+
+    The pooled path builds its own header dict, so without normalising, a vendor
+    sending `content-encoding` instead of `Content-Encoding` would skip gunzipping and
+    return compressed bytes as if they were JSON. These three APIs already disagree
+    about the casing of `ETag` — ashby and greenhouse send `etag`, lever sends `ETag` —
+    so the disagreement is real, not hypothetical.
+    """
+    import gzip as gziplib
+    import job_boards as jb
+
+    payload = gziplib.compress(b'{"jobs": []}')
+    for header_name in ("Content-Encoding", "content-encoding", "CONTENT-ENCODING"):
+        original = jb._single_request
+        jb._single_request = lambda u, m, t, _h=header_name: (
+            200, jb._lower_headers([(_h, "gzip")]), payload
+        )
+        try:
+            assert jb.fetch("https://api.lever.co/x") == b'{"jobs": []}', \
+                f"gunzip failed when the server sent {_h!r}"
+        finally:
+            jb._single_request = original
+
+
+def test_pooled_request_retries_once_on_a_dead_connection():
+    """Servers close idle keep-alive connections; the next use raises, not the close.
+
+    Without the retry a run would surface random failures on boards that happen to
+    follow an idle gap.
+    """
+    import http.client
+    import job_boards as jb
+
+    attempts = []
+
+    class FakeConn:
+        def __init__(self, host, timeout=None):
+            self.host = host
+            attempts.append(host)
+        def request(self, method, target, headers=None):
+            if len(attempts) == 1:      # the first, stale connection fails
+                raise http.client.RemoteDisconnected("closed by server")
+        def getresponse(self):
+            class R:
+                status = 200
+                def read(self): return b"ok"
+                def getheaders(self): return []
+            return R()
+        def close(self): pass
+
+    original = http.client.HTTPSConnection
+    http.client.HTTPSConnection = FakeConn
+    jb._CONNECTIONS.__dict__.pop("pool", None)
+    try:
+        status, _, body = jb._pooled_request("https://api.lever.co/x", "GET", 5)
+    finally:
+        http.client.HTTPSConnection = original
+        jb._CONNECTIONS.__dict__.pop("pool", None)
+    assert (status, body) == (200, b"ok")
+    assert len(attempts) == 2, "a dead pooled connection must be replaced and retried once"
+
+
 def test_board_exists_uses_head_and_maps_404_to_false():
     """Validation must not download board payloads — thousands of GETs would be GBs."""
     import job_boards

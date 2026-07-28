@@ -44,7 +44,7 @@ This diagram follows `main()`, `load_boards()`, `SOURCES`, `scan_board()`, and `
 | Component | Source | Responsibility |
 |---|---|---|
 | CLI parser | `/job_boards.py` `main()` | Validates flag combinations, parses `--ats`, compiles optional grep regex, derives default title behavior, selects board subset, orchestrates scanning and writing. |
-| HTTP client | `/job_boards.py` `fetch()` | Adds `User-Agent` and gzip headers, decompresses gzip responses, maps 404 to `NotFound`, maps 503 to `RateLimited`, and retries transient 5xx/URL errors. |
+| HTTP client | `/job_boards.py` `fetch()`, `_single_request()`, `_pooled_request()` | Adds `User-Agent` and gzip headers, reuses per-thread connections for posting API hosts, lowercases response headers, decompresses gzip responses, maps 404 to `NotFound`, maps 503 to `RateLimited`, and retries transient 5xx/URL errors or one dead pooled connection. |
 | ATS adapters | `/job_boards.py` `SOURCES`, `normalize_ashby()`, `normalize_greenhouse()`, `normalize_lever()` | Define archive domains, posting API URL templates, payload job extraction, optional content parameters, and normalization into the shared row shape. |
 | Board loader | `/job_boards.py` `load_boards()` | Merges generated `boards.json` and `/boards.seed.json` by platform, or calls discovery for each selected ATS on `--refresh-boards`. |
 | Scanner | `/job_boards.py` `scan_board()` | Fetches one platform board, validates payload shape, normalizes jobs, filters rows, and retains only grep fragments from descriptions. |
@@ -58,7 +58,7 @@ The scraper treats platform payloads as adapter input rather than a shared schem
 
 Descriptions are intentionally bounded. Ashby and Lever return description text in the normal board payload, but Greenhouse requires `?content=true`, which the README documents as roughly 26x the bytes for a measured board. `scan_board()` only requests Greenhouse content when `--grep` is set, strips markup through `plain_text()`, stores at most two surrounding fragments from `fragments()`, and never includes whole descriptions in output rows.
 
-Concurrency is deliberately simple: `ThreadPoolExecutor(max_workers=args.concurrency)` fans out over `(ats, slug)` pairs in `main()`, and discovery validation uses the same pattern in `discover_boards()`. Common Crawl paging is separately throttled in [board discovery](../workflows/board-discovery.md).
+Concurrency is deliberately simple: `ThreadPoolExecutor(max_workers=args.concurrency)` fans out over `(ats, slug)` pairs in `main()`, and discovery validation uses the same pattern in `discover_boards()`. Posting API hosts share per-thread HTTP connections through `_POOLED_HOSTS` and `_CONNECTIONS`, while archive and urlscan requests still use `urlopen` because they are few, may redirect, and do not benefit from raw host pooling. Common Crawl paging is separately throttled in [board discovery](../workflows/board-discovery.md).
 
 ## Error handling boundaries
 
