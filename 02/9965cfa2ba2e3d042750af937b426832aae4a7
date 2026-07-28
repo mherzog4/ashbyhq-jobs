@@ -1,0 +1,23 @@
+AGENTS.md
+  s_5cd0c40458ac62::t_65bdd9853d9f86 42-81
+  s_5cd0c40458ac62::t_97c77485e9848b 82
+CLAUDE.md
+  s_5cd0c40458ac62::t_5bcf038429bb6e 42-81
+  s_5cd0c40458ac62::t_6d90f0df24db16 82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "029965cfa2ba2e3d042750af937b426832aae4a7",
+  "prompts": {},
+  "sessions": {
+    "s_5cd0c40458ac62": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "77015ceb-64c5-4bde-8a93-ed8d452801c0",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Mherzog4 <matthewherzog4@gmail.com>"
+    }
+  }
+}
