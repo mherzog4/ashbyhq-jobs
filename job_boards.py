@@ -97,6 +97,10 @@ class NotFound(Exception):
     """Board slug returned 404 — not a customer of that ATS (or never was)."""
 
 
+class NotModified(Exception):
+    """Server answered 304: the body is byte-identical to what we last fetched."""
+
+
 class RateLimited(Exception):
     """Common Crawl returned 503. Per their docs this means the request rate was
     too high; a repeatedly-abusive IP can be blocked for 24 hours."""
@@ -130,7 +134,7 @@ def _lower_headers(items) -> dict:
     return {k.lower(): v for k, v in (items.items() if hasattr(items, "items") else items)}
 
 
-def _pooled_request(url: str, method: str, timeout: int) -> tuple[int, dict, bytes]:
+def _pooled_request(url: str, method: str, timeout: int, headers: dict) -> tuple[int, dict, bytes]:
     """One request over a reused per-thread connection. Returns (status, headers, body).
 
     A pooled connection can be closed by the server between requests, which surfaces
@@ -150,7 +154,7 @@ def _pooled_request(url: str, method: str, timeout: int) -> tuple[int, dict, byt
                 parts.netloc, timeout=timeout
             )
         try:
-            conn.request(method, target, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
+            conn.request(method, target, headers=headers)
             resp = conn.getresponse()
             body = resp.read()  # must drain, or the connection cannot be reused
             return resp.status, _lower_headers(resp.getheaders()), body
@@ -165,13 +169,16 @@ def _pooled_request(url: str, method: str, timeout: int) -> tuple[int, dict, byt
     raise RuntimeError("unreachable")
 
 
-def _single_request(url: str, method: str, timeout: int) -> tuple[int, dict, bytes]:
+def _single_request(
+    url: str, method: str, timeout: int, etag: str | None = None
+) -> tuple[int, dict, bytes]:
     """One request, pooled where that is safe and via urlopen everywhere else."""
+    headers = {"User-Agent": UA, "Accept-Encoding": "gzip"}
+    if etag:
+        headers["If-None-Match"] = etag
     if urllib.parse.urlsplit(url).netloc in _POOLED_HOSTS:
-        return _pooled_request(url, method, timeout)
-    req = urllib.request.Request(
-        url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"}, method=method
-    )
+        return _pooled_request(url, method, timeout, headers)
+    req = urllib.request.Request(url, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, _lower_headers(resp.headers), resp.read()
@@ -179,7 +186,14 @@ def _single_request(url: str, method: str, timeout: int) -> tuple[int, dict, byt
         return e.code, _lower_headers(e.headers or {}), e.read()
 
 
-def fetch(url: str, timeout: int = 30, retries: int = 4, method: str = "GET") -> bytes:
+def fetch(
+    url: str,
+    timeout: int = 30,
+    retries: int = 4,
+    method: str = "GET",
+    etag: str | None = None,
+    meta: dict | None = None,
+) -> bytes:
     """GET a URL, transparently gunzipping. Raises NotFound on 404.
 
     Common Crawl's CDX index 502/504s under load often enough that a single
@@ -187,7 +201,11 @@ def fetch(url: str, timeout: int = 30, retries: int = 4, method: str = "GET") ->
     """
     for attempt in range(retries):
         try:
-            status, headers, body = _single_request(url, method, timeout)
+            status, headers, body = _single_request(url, method, timeout, etag)
+            if meta is not None:
+                meta["etag"] = headers.get("etag")
+            if status == 304:
+                raise NotModified(url)
             if status == 404:
                 raise NotFound(url)
             if status == 503:
@@ -655,6 +673,8 @@ def scan_board(
     mode: str,
     pattern: re.Pattern[str] | None = None,
     cutoff: datetime | None = None,
+    etag: str | None = None,
+    meta: dict | None = None,
 ) -> list[dict]:
     """Fetch one board, return flat rows for matching listed jobs.
 
@@ -663,7 +683,9 @@ def scan_board(
     thousands of boards' worth would be gigabytes.
     """
     source = SOURCES[ats]
-    payload = json.loads(fetch(board_url(ats, slug, want_content=pattern is not None)))
+    payload = json.loads(
+        fetch(board_url(ats, slug, want_content=pattern is not None), etag=etag, meta=meta)
+    )
     jobs = source["jobs"](payload)
     if not isinstance(jobs, list):
         # Fail loudly on a shape change rather than silently reporting no results.
@@ -784,6 +806,61 @@ def may_close_postings(
     would mark every posting older than a week as closed.
     """
     return not (title or pattern or cutoff or new_only)
+
+
+_ETAG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS board_etag (
+    ats     TEXT NOT NULL,
+    company TEXT NOT NULL,
+    etag    TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (ats, company)
+);
+"""
+
+
+def may_use_etags(
+    title: str | None,
+    pattern: re.Pattern[str] | None,
+    cutoff: datetime | None,
+    remote_only: bool,
+    new_only: bool,
+) -> bool:
+    """Is a 304 safe to treat as "nothing new on this board"?
+
+    Only for a run that is unfiltered apart from --new-only. A 304 says the body is
+    unchanged since the stored etag; concluding "no new postings" from that also
+    requires that the fetch which stored the etag actually persisted every posting.
+    A --title run stores rows for matching postings only, so trusting its etag later
+    would skip a board whose non-matching postings were never recorded.
+
+    Storing and using etags are gated on the same predicate, so an etag in the
+    database always came from a full, persisted fetch.
+    """
+    return new_only and not (title or pattern or cutoff or remote_only)
+
+
+def load_etags(db_path: Path) -> dict[tuple[str, str], str]:
+    """Stored etags, keyed by board. Empty if the table does not exist yet."""
+    if not db_path.exists():
+        return {}
+    with sqlite3.connect(db_path) as con:
+        con.executescript(_ETAG_SCHEMA)
+        return {(a, c): e for a, c, e in con.execute(
+            "SELECT ats, company, etag FROM board_etag")}
+
+
+def save_etags(db_path: Path, etags: dict[tuple[str, str], str], seen_at: str) -> None:
+    if not etags:
+        return
+    with sqlite3.connect(db_path) as con:
+        con.executescript(_ETAG_SCHEMA)
+        con.executemany(
+            "INSERT INTO board_etag (ats, company, etag, seen_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(ats, company) DO UPDATE SET etag=excluded.etag, "
+            "seen_at=excluded.seen_at",
+            [(a, c, e, seen_at) for (a, c), e in etags.items()],
+        )
 
 
 def known_keys(db_path: Path) -> set[tuple[str, str]]:
@@ -1002,12 +1079,38 @@ def main() -> None:
     dead: set[tuple[str, str]] = set()
     errors = 0
 
+    # Conditional requests, but only when a 304 genuinely means "nothing new here".
+    db_path = HERE / args.db if not Path(args.db).is_absolute() else Path(args.db)
+    conditional = not args.no_db and may_use_etags(
+        title, pattern, cutoff, args.remote, args.new_only
+    )
+    etags = load_etags(db_path) if conditional else {}
+    fresh_etags: dict[tuple[str, str], str] = {}
+    unchanged = 0
+    etag_lock = threading.Lock()
+    if conditional and etags:
+        print(f"  {len(etags)} boards have a stored etag; unchanged ones will be skipped",
+              file=sys.stderr)
+
     def work(item: tuple[str, str]) -> list[dict]:
-        nonlocal errors
+        nonlocal errors, unchanged
         ats, slug = item
+        meta: dict = {}
         for attempt in range(2):
             try:
-                return scan_board(ats, slug, title, args.remote, args.match, pattern, cutoff)
+                found = scan_board(
+                    ats, slug, title, args.remote, args.match, pattern, cutoff,
+                    etag=etags.get(item) if conditional else None,
+                    meta=meta if conditional else None,
+                )
+                if conditional and meta.get("etag"):
+                    with etag_lock:
+                        fresh_etags[item] = meta["etag"]
+                return found
+            except NotModified:
+                with etag_lock:
+                    unchanged += 1
+                return []
             except NotFound:
                 dead.add(item)
                 return []
@@ -1023,11 +1126,10 @@ def main() -> None:
             if i % 500 == 0 or i == len(scanned):
                 print(
                     f"  {i}/{len(scanned)} boards | {len(dead)} 404 | "
-                    f"{errors} err | {len(rows)} matches",
+                    f"{errors} err | {unchanged} unchanged | {len(rows)} matches",
                     file=sys.stderr,
                 )
 
-    db_path = HERE / args.db if not Path(args.db).is_absolute() else Path(args.db)
     if args.new_only:
         # Drop anything the database has already recorded. Done here rather than in
         # scan_board so the board fetch stays independent of storage.
@@ -1058,6 +1160,8 @@ def main() -> None:
     written = f"{csv_path.name}, {json_path.name}"
     if not args.no_db:
         seen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if conditional:
+            save_etags(db_path, fresh_etags, seen_at)
         # Only an unfiltered run saw everything, so only it may close postings.
         covered = scanned if may_close_postings(title, pattern, cutoff, args.new_only) else None
         new, updated, closed = save(rows, db_path, seen_at, covered)

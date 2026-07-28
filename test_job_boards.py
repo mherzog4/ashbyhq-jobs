@@ -114,6 +114,75 @@ def test_every_posting_api_host_is_pooled():
         assert host in _POOLED_HOSTS, f"{ats} posting API host {host} is not pooled"
 
 
+def test_etags_are_only_trusted_on_an_unfiltered_run():
+    """A 304 only means "no new postings" if the fetch that stored the etag kept
+    every posting.
+
+    A --title run persists matching rows only. Trusting its etag later would skip a
+    board whose non-matching postings were never recorded, so they would never appear
+    even once they matched a later query. Storing and using etags share this gate, so
+    an etag in the database always came from a full, persisted fetch.
+    """
+    from datetime import timedelta
+    from job_boards import may_use_etags
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+
+    assert may_use_etags(None, None, None, False, True), "--all --new-only is the one case"
+    assert not may_use_etags(None, None, None, False, False), "without --new-only, rows are needed"
+    assert not may_use_etags("engineer", None, None, False, True), "--title persists a subset"
+    assert not may_use_etags(None, re.compile("x"), None, False, True), "--grep persists a subset"
+    assert not may_use_etags(None, None, cutoff, False, True), "--since persists a subset"
+    assert not may_use_etags(None, None, None, True, True), "--remote persists a subset"
+
+
+def test_a_304_skips_the_board():
+    """The whole point: an unchanged board costs no body at all."""
+    import job_boards as jb
+    original = jb._single_request
+    jb._single_request = lambda u, m, t, e=None: (304, {"etag": e}, b"")
+    try:
+        raised = False
+        try:
+            scan_board("ashby", "acme", None, False, "fuzzy", etag='W/"abc"')
+        except jb.NotModified:
+            raised = True
+        assert raised, "a 304 must surface as NotModified so the caller can skip"
+    finally:
+        jb._single_request = original
+
+
+def test_etags_round_trip_through_the_database():
+    from job_boards import load_etags, save_etags
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        assert load_etags(db) == {}, "a missing database has no etags"
+        save_etags(db, {("ashby", "acme"): 'W/"v1"'}, "2026-01-01T00:00:00+00:00")
+        assert load_etags(db) == {("ashby", "acme"): 'W/"v1"'}
+        save_etags(db, {("ashby", "acme"): 'W/"v2"'}, "2026-02-02T00:00:00+00:00")
+        assert load_etags(db) == {("ashby", "acme"): 'W/"v2"'}, "an etag must be replaced"
+
+
+def test_conditional_request_sends_if_none_match():
+    """Without the header the server has nothing to compare and always returns 200."""
+    import job_boards as jb
+    seen = {}
+
+    def fake_pooled(url, method, timeout, headers):
+        seen.update(headers)
+        return 200, {}, b"{}"
+
+    original = jb._pooled_request
+    jb._pooled_request = fake_pooled
+    try:
+        jb._single_request("https://api.lever.co/x", "GET", 5, 'W/"abc"')
+        assert seen.get("If-None-Match") == 'W/"abc"'
+        seen.clear()
+        jb._single_request("https://api.lever.co/x", "GET", 5, None)
+        assert "If-None-Match" not in seen, "no etag means no conditional header"
+    finally:
+        jb._pooled_request = original
+
+
 def test_header_lookup_is_case_insensitive():
     """urlopen returned a case-insensitive Message; a plain dict is not.
 
@@ -129,7 +198,7 @@ def test_header_lookup_is_case_insensitive():
     payload = gziplib.compress(b'{"jobs": []}')
     for header_name in ("Content-Encoding", "content-encoding", "CONTENT-ENCODING"):
         original = jb._single_request
-        jb._single_request = lambda u, m, t, _h=header_name: (
+        jb._single_request = lambda u, m, t, e=None, _h=header_name: (
             200, jb._lower_headers([(_h, "gzip")]), payload
         )
         try:
@@ -169,7 +238,7 @@ def test_pooled_request_retries_once_on_a_dead_connection():
     http.client.HTTPSConnection = FakeConn
     jb._CONNECTIONS.__dict__.pop("pool", None)
     try:
-        status, _, body = jb._pooled_request("https://api.lever.co/x", "GET", 5)
+        status, _, body = jb._pooled_request("https://api.lever.co/x", "GET", 5, {"User-Agent": "t"})
     finally:
         http.client.HTTPSConnection = original
         jb._CONNECTIONS.__dict__.pop("pool", None)

@@ -53,6 +53,8 @@ The README recommends monthly full `--refresh-boards` runs because board discove
 
 Schedule unfiltered `--all` runs if you want the SQLite database to become a fill-rate or disappearance signal. The [data model](../architecture/data-model.md) only stamps `closed_at` after an unfiltered run has covered a board and omitted a previously seen posting. Filtered searches, including `--since` and `--new-only`, update matching postings but cannot prove that non-matching postings disappeared.
 
+For low-transfer freshness checks, repeat `uv run job_boards.py --all --new-only` with the database enabled. The [job scrape workflow](../workflows/job-scrape.md) stores per-board ETags during safe full persisted fetches and sends them back on later `--all --new-only` runs, so unchanged boards return 304 and are counted as `unchanged` without downloading posting bodies. Do not combine this mode with `--no-db`; it needs both known posting keys and stored board ETags.
+
 Useful database questions from the README include new postings in the last day, platform comparison through the `ats` column, currently open roles (`closed_at IS NULL`), recently closed roles, and companies filling roles quickly.
 
 ## Generated output hygiene

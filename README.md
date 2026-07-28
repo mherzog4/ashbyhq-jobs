@@ -604,18 +604,33 @@ Greenhouse and Lever, not more. **Raising `--concurrency` is not on the table** 
 requirement, not a tunable, and it is the one knob that would speed things up by pushing
 cost onto someone else's servers.
 
-### Known, unexploited: conditional requests
+### Conditional requests on `--all --new-only`
 
-All three APIs return `ETag` and honour `If-None-Match` with a `304`. On a repeat pass an
-unchanged board could cost a few hundred bytes instead of up to 220KB. This is not
-implemented, because a `304` returns no body and a full dump needs the rows — it only
-pays off combined with `--new-only`, where an unchanged board can be skipped outright.
-That is the largest remaining win for scheduled runs.
+All three APIs honour `If-None-Match` and answer `304` when a board has not changed.
+`--all --new-only` stores each board's `ETag` and sends it back on the next run, so an
+unchanged board transfers **nothing at all**:
 
-Worth knowing if you implement it: the three APIs disagree on header casing. Ashby and
-Greenhouse send `etag`, Lever sends `ETag`. Looking one up case-sensitively silently
-returns nothing, which is exactly the mistake that made a first measurement here report
-1 of 3 platforms supporting `304` when all 3 do.
+```
+450/450 boards | 0 404 | 0 err | 450 unchanged | 0 matches
+```
+
+Measured over 180 boards on a repeat pass: **17.23 MB → 0 MB, 100% of bytes eliminated.**
+Wall clock improves less than that suggests, because a `304` still costs a round trip and
+this workload is latency-bound — but it is a large reduction in what the platforms have
+to serve.
+
+**Only `--all --new-only` uses them, and that restriction is load-bearing.** A `304` says
+the body is unchanged; concluding "no new postings" from that *also* requires that the
+fetch which stored the ETag persisted every posting. A `--title` run stores matching rows
+only, so trusting its ETag later would skip a board whose non-matching postings were
+never recorded — they would stay invisible even once a later query did match them.
+Storing and using ETags share one gate, `may_use_etags()`, so an ETag in the database
+always came from a full, persisted fetch.
+
+The three APIs disagree on header casing — Ashby and Greenhouse send `etag`, Lever sends
+`ETag`. A case-sensitive lookup silently returns nothing, which is what made a first
+measurement here report 1 of 3 platforms supporting `304` when all 3 do. Header names are
+normalised to lowercase for exactly this reason.
 
 ## Being a good citizen
 

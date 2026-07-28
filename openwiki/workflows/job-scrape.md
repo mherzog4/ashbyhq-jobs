@@ -30,8 +30,13 @@ This workflow consumes slugs from [board discovery](board-discovery.md), calls e
 ```mermaid
 flowchart TD
     Board["ats and board slug"] --> URL["build platform API URL"]
-    URL --> Fetch["GET posting API"]
-    Fetch --> Shape{"jobs list available"}
+    URL --> Conditional{"safe stored ETag"}
+    Conditional -->|"yes"| Header["send If None Match"]
+    Conditional -->|"no"| Fetch["GET posting API"]
+    Header --> Fetch
+    Fetch --> Modified{"304 response"}
+    Modified -->|"yes"| Skip["count unchanged and skip board"]
+    Modified -->|"no"| Shape{"jobs list available"}
     Shape -->|"no"| Fail["raise ValueError"]
     Shape -->|"yes"| Adapter["normalize platform job"]
     Adapter --> Listed["skip adapter-rejected jobs"]
@@ -48,7 +53,7 @@ flowchart TD
 
 This flow shows the per-board filtering path before `main()` applies database-backed `--new-only` filtering.
 
-`scan_board()` implements the branch logic through description matching; `main()` then applies `--new-only` against SQLite before writing outputs.
+`scan_board()` implements the branch logic through description matching; `main()` supplies ETags only when `may_use_etags()` says the run is safe, then applies `--new-only` against SQLite before writing outputs.
 
 ## Platform adapters
 
@@ -79,7 +84,9 @@ The CLI warns when a grep pattern contains no `\b` word boundary because terms c
 
 Greenhouse is the expensive case: its normal list endpoint omits descriptions, so `--grep` appends `content=true` and the CLI warns that this is roughly 26x the bytes of a normal Greenhouse run. Ashby and Lever already return description text in their list payloads.
 
-## Board-level failures
+## Conditional requests and board-level failures
+
+For repeat `--all --new-only` scans with the database enabled, `main()` loads stored per-board ETags from the [data model](../architecture/data-model.md), passes them as `If-None-Match`, treats `NotModified` as an unchanged board with no rows to emit, and reports the `unchanged` count in progress output. The gate is intentionally narrow: `may_use_etags()` rejects title, grep, since, and remote filters because a 304 is only safe when the previous ETag came from a full persisted board fetch and the current run only needs newly unseen rows.
 
 The worker function inside `main()` retries each board once for non-404 exceptions. A `NotFound` marks the `(ats, slug)` dead for the run. After an unlimited run, dead boards are pruned from generated `boards.json` for the selected platforms so future runs skip them. Limited runs do not rewrite the full cache.
 
@@ -97,4 +104,4 @@ Only a run with no title, grep, since cutoff, or new-only filter passes its scan
 
 ## Change guidance
 
-When adding a filter, decide whether it narrows coverage and update `may_close_postings()` in the same change. If it does, it should prevent closing missing postings just like title, grep, since, and new-only filters. When adding an ATS, add a `SOURCES` entry, a normalizer that fills the shared `FIELDS`, seed entries where useful, and tests in [testing](../testing.md) for URL construction, normalization, row shape, and expensive-description behavior.
+When adding a filter, decide whether it narrows coverage and update `may_close_postings()` in the same change. If it does, it should prevent closing missing postings just like title, grep, since, and new-only filters. Also decide whether the filter makes conditional ETag skips unsafe and update `may_use_etags()` with tests. When adding an ATS, add a `SOURCES` entry, a normalizer that fills the shared `FIELDS`, seed entries where useful, and tests in [testing](../testing.md) for URL construction, normalization, row shape, and expensive-description behavior.

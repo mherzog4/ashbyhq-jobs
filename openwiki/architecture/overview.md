@@ -20,6 +20,7 @@ sequenceDiagram
     participant API as Posting APIs
     participant Outputs as CSV JSON SQLite
     User->>Main: run uv script with flags
+    Main->>Outputs: load stored board ETags when safe
     Main->>Boards: load_boards refresh flag and ats list
     alt refresh requested or no usable cache
         Boards->>Boards: discover candidates and validate slugs per ATS
@@ -27,10 +28,15 @@ sequenceDiagram
         Boards->>Boards: merge boards json and seed json per ATS
     end
     Main->>Sources: select Ashby Greenhouse Lever adapters
-    Main->>API: scan selected boards concurrently
-    API-->>Sources: platform payloads
-    Sources-->>Main: normalized rows with ats field
-    Main->>Main: filter jobs by title grep remote
+    Main->>API: scan selected boards concurrently with optional If None Match
+    alt board unchanged
+        API-->>Main: 304 Not Modified
+        Main->>Main: count unchanged board and skip rows
+    else board changed or no ETag
+        API-->>Sources: platform payloads
+        Sources-->>Main: normalized rows with ats field
+        Main->>Main: filter jobs by title grep remote
+    end
     Main->>Outputs: write CSV and JSON
     opt database enabled
         Main->>Outputs: upsert rows and close missing postings when unfiltered
@@ -44,11 +50,11 @@ This diagram follows `main()`, `load_boards()`, `SOURCES`, `scan_board()`, and `
 | Component | Source | Responsibility |
 |---|---|---|
 | CLI parser | `/job_boards.py` `main()` | Validates flag combinations, parses `--ats`, compiles optional grep regex, derives default title behavior, selects board subset, orchestrates scanning and writing. |
-| HTTP client | `/job_boards.py` `fetch()`, `_single_request()`, `_pooled_request()` | Adds `User-Agent` and gzip headers, reuses per-thread connections for posting API hosts, lowercases response headers, decompresses gzip responses, maps 404 to `NotFound`, maps 503 to `RateLimited`, and retries transient 5xx/URL errors or one dead pooled connection. |
+| HTTP client | `/job_boards.py` `fetch()`, `_single_request()`, `_pooled_request()` | Adds `User-Agent`, gzip, and optional `If-None-Match` headers; reuses per-thread connections for posting API hosts; lowercases response headers; captures ETags for safe runs; decompresses gzip responses; maps 304 to `NotModified`, 404 to `NotFound`, and 503 to `RateLimited`; and retries transient 5xx/URL errors or one dead pooled connection. |
 | ATS adapters | `/job_boards.py` `SOURCES`, `normalize_ashby()`, `normalize_greenhouse()`, `normalize_lever()` | Define archive domains, posting API URL templates, payload job extraction, optional content parameters, and normalization into the shared row shape. |
 | Board loader | `/job_boards.py` `load_boards()` | Merges generated `boards.json` and `/boards.seed.json` by platform, or calls discovery for each selected ATS on `--refresh-boards`. |
-| Scanner | `/job_boards.py` `scan_board()` | Fetches one platform board, validates payload shape, normalizes jobs, filters rows, and retains only grep fragments from descriptions. |
-| Persistence | `/job_boards.py` `save()` | Creates or migrates the SQLite table, upserts by `(ats, posting id)`, preserves history, and stamps `closed_at` only when coverage is exhaustive. |
+| Scanner | `/job_boards.py` `scan_board()` | Fetches one platform board with an optional board ETag, validates payload shape, normalizes jobs, filters rows, and retains only grep fragments from descriptions. |
+| Persistence | `/job_boards.py` `save()`, `load_etags()`, `save_etags()` | Creates or migrates the SQLite tables, upserts jobs by `(ats, posting id)`, preserves posting history, stores per-board ETags for conditional requests, and stamps `closed_at` only when coverage is exhaustive. |
 
 ## Design constraints
 
@@ -58,7 +64,7 @@ The scraper treats platform payloads as adapter input rather than a shared schem
 
 Descriptions are intentionally bounded. Ashby and Lever return description text in the normal board payload, but Greenhouse requires `?content=true`, which the README documents as roughly 26x the bytes for a measured board. `scan_board()` only requests Greenhouse content when `--grep` is set, strips markup through `plain_text()`, stores at most two surrounding fragments from `fragments()`, and never includes whole descriptions in output rows.
 
-Concurrency is deliberately simple: `ThreadPoolExecutor(max_workers=args.concurrency)` fans out over `(ats, slug)` pairs in `main()`, and discovery validation uses the same pattern in `discover_boards()`. Posting API hosts share per-thread HTTP connections through `_POOLED_HOSTS` and `_CONNECTIONS`, while archive and urlscan requests still use `urlopen` because they are few, may redirect, and do not benefit from raw host pooling. Common Crawl paging is separately throttled in [board discovery](../workflows/board-discovery.md).
+Concurrency is deliberately simple: `ThreadPoolExecutor(max_workers=args.concurrency)` fans out over `(ats, slug)` pairs in `main()`, and discovery validation uses the same pattern in `discover_boards()`. Posting API hosts share per-thread HTTP connections through `_POOLED_HOSTS` and `_CONNECTIONS`, while archive and urlscan requests still use `urlopen` because they are few, may redirect, and do not benefit from raw host pooling. Repeat `--all --new-only` scans can also send stored board ETags from the [data model](data-model.md); `may_use_etags()` restricts that optimization to runs where a 304 genuinely means there are no new postings to emit in the [job scrape workflow](../workflows/job-scrape.md). Common Crawl paging is separately throttled in [board discovery](../workflows/board-discovery.md).
 
 ## Error handling boundaries
 

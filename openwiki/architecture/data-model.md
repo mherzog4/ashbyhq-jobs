@@ -62,15 +62,24 @@ erDiagram
         TEXT last_seen
         TEXT closed_at
     }
+    BOARD_ETAG {
+        TEXT ats PK
+        TEXT company PK
+        TEXT etag
+        TEXT seen_at
+    }
+    BOARD_ETAG ||--o{ JOBS : accelerates
 ```
 
-The table is created by `_create_table()` in `/job_boards.py` with primary key `(ats, id)`. `_prepare()` creates the table, migrates older schemas, and only then creates indexes on `(ats, company)`, `last_seen`, and `closed_at`. That order matters because an index on a column the migration has not added yet cannot be created.
+The `jobs` table is created by `_create_table()` in `/job_boards.py` with primary key `(ats, id)`. `_prepare()` creates it, migrates older schemas, and only then creates indexes on `(ats, company)`, `last_seen`, and `closed_at`. That order matters because an index on a column the migration has not added yet cannot be created.
+
+The `board_etag` table is created by `load_etags()` and `save_etags()` with primary key `(ats, company)`. It stores the latest response ETag seen for a board during a safe persisted fetch, so the [job scrape workflow](../workflows/job-scrape.md) can send `If-None-Match` on a later `--all --new-only` run and skip a board that returns 304. It is not a posting-history table and does not participate in `closed_at` lifecycle decisions.
 
 ## Upsert rules
 
 Rows are keyed by `(ats, id)`. Rows without an `id` are skipped. The composite key is deliberate: Greenhouse posting ids are integers while Ashby and Lever use UUID-like ids, so a bare `id` risks collisions across platforms. On conflict, `first_seen` is preserved, `last_seen` is refreshed to the current run timestamp, and most fields are overwritten because upstream titles, locations, and other posting metadata can change in place.
 
-`matched` is the exception. If a later run has an empty `matched` value, it does not erase grep context found by an earlier `--grep` run. A later run with non-empty `matched` does update the stored context. `--new-only` reads existing `(ats, id)` keys through `known_keys()` before saving, so its output contains only rows absent from the database; legacy pre-multi-ATS databases are treated as Ashby keys during that lookup.
+`matched` is the exception. If a later run has an empty `matched` value, it does not erase grep context found by an earlier `--grep` run. A later run with non-empty `matched` does update the stored context. `--new-only` reads existing `(ats, id)` keys through `known_keys()` before saving, so its output contains only rows absent from the database; legacy pre-multi-ATS databases are treated as Ashby keys during that lookup. When `--new-only` is otherwise unfiltered, `may_use_etags()` also allows stored board ETags to reduce repeat-scan transfer without changing which new rows are written.
 
 Opening a pre-multi-ATS database triggers a rebuild because SQLite cannot alter a primary key in place. `_prepare()` labels every existing row as `ats = 'ashby'`, carries forward compatible columns including `closed_at`, drops the old table, and renames the rebuilt table. Older databases that only lack `closed_at` get that column added before indexes are created.
 
@@ -92,4 +101,4 @@ Closing is scoped to `(ats, company)` pairs actually scanned. If `--limit` scann
 
 ## Change guidance
 
-Any schema or lifecycle change should be made with tests first or alongside source changes. Update [testing](../testing.md) for upsert preservation, migration from older databases, filtered-run safety, `may_close_postings()` coverage, and reopen behavior. Update [operations](../operations/runbook.md) if SQL examples, output filenames, or scheduling advice change.
+Any schema or lifecycle change should be made with tests first or alongside source changes. Update [testing](../testing.md) for upsert preservation, migration from older databases, filtered-run safety, `may_close_postings()` coverage, `board_etag` round-tripping, ETag safety gates, and reopen behavior. Update [operations](../operations/runbook.md) if SQL examples, output filenames, or scheduling advice change.
